@@ -24,13 +24,16 @@ import {
   titleLine,
   unknownPrompts,
   userPromptTexts,
+  emptyViewport,
+  noteMove,
+  noteReport,
   viewSpan,
   withLivePrompt,
   withPastPrompts,
   withPrompt,
   withoutBadStops,
 } from './logic'
-import type { NavKind, Seen } from './logic'
+import type { NavKind, Viewport } from './logic'
 
 const FIRST_PROMPT = { plugin: 'session-compass', key: 'firstPrompt' } as const
 const SUMMARY = { plugin: 'session-compass', key: 'summary' } as const
@@ -92,15 +95,15 @@ const renderBuffer = new Map<string, string>()
 // What each drawn prompt row last said of the viewport (`onScreen`), per
 // surface: where the person has scrolled to, read when a button is pressed.
 // Kept here, not in state, for the same reason as renderBuffer.
-const seenBySurface = new Map<string, Map<string, Seen>>()
+const viewBySurface = new Map<string, Viewport>()
 
-function seenOn(surface: string): Map<string, Seen> {
-  let seen = seenBySurface.get(surface)
-  if (seen === undefined) {
-    seen = new Map()
-    seenBySurface.set(surface, seen)
+function viewOn(surface: string): Viewport {
+  let view = viewBySurface.get(surface)
+  if (view === undefined) {
+    view = emptyViewport()
+    viewBySurface.set(surface, view)
   }
-  return seen
+  return view
 }
 
 function debug($: Dollar, text: string): void {
@@ -390,8 +393,8 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     if (renderBuffer.size > 0) await mergeBuffer($)
     const held = await $.state.get(NAV)
     const nav = withoutBadStops(held.value ?? EMPTY_NAV)
-    const seen = seenOn(surface)
-    const view = viewSpan(nav.promptIds, seen)
+    const viewport = viewOn(surface)
+    const view = viewSpan(nav.promptIds, viewport.seen, viewport.sides)
     const target = navTarget(kind, nav.promptIds, nav.cursorId, view)
     debug(
       $,
@@ -401,10 +404,19 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     if (target === null) return
     debug($, `${kind} scrolls to ${target.id}`)
     // What the rows said of the old viewport no longer holds once it moves;
-    // the rows the scroll brings on screen report afresh.
-    seen.clear()
-    const scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
+    // the rows the scroll brings on screen report afresh. A scroll that does
+    // not land leaves the viewport, and what is known of it, as it was.
+    const before = { seen: new Map(viewport.seen), sides: new Map(viewport.sides) }
+    noteMove(viewport, nav.promptIds, target.index)
+    let scrolled: { deny?: string }
+    try {
+      scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
+    } catch (error) {
+      scrolled = { deny: String(error) }
+    }
     if (scrolled.deny !== undefined) {
+      viewport.seen = before.seen
+      viewport.sides = before.sides
       debug($, `could not scroll to the prompt: ${scrolled.deny}`)
       return
     }
@@ -475,7 +487,7 @@ export const register: Register = on => {
     if (isStopId(e.requestId) && isOwnPrompt(origin, { task, from }) && text.trim() !== '') {
       renderBuffer.set(e.requestId, promptKey(text))
       if ('onScreen' in e.props && e.props.onScreen !== undefined) {
-        seenOn(e.surface).set(e.requestId, e.props.onScreen)
+        noteReport(viewOn(e.surface), e.requestId, e.props.onScreen)
       }
     }
     return next(e)

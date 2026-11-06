@@ -26,6 +26,9 @@ import {
   summaryLine,
   textWidth,
   userPromptTexts,
+  emptyViewport,
+  noteMove,
+  noteReport,
   viewSpan,
   withLivePrompt,
   withPastPrompts,
@@ -399,5 +402,58 @@ describe('the prompts the summary is made from', () => {
   test('the last summary shows while a new one runs and after one fails', () => {
     expect(bandText('first', { status: 'pending', token: 'x', text: 'old' }, 40)).toEqual({ kind: 'summary', text: 'old' })
     expect(bandText('first', { status: 'failed', reason: 'api-error', text: 'old' }, 40)).toEqual({ kind: 'summary', text: 'old' })
+  })
+})
+
+describe('a viewport with no prompt row on screen', () => {
+  const ids = ['a', 'b', 'c', 'd']
+
+  test('a row cut at the top that goes off screen went up past the top', () => {
+    const view = emptyViewport()
+    noteReport(view, 'b', { first: 0, last: 2, of: 3 })
+    noteReport(view, 'b', { first: 2, last: 2, of: 3 })
+    noteReport(view, 'b', null)
+    expect(view.sides.get('b')).toBe('above')
+    // Scrolled up from the end to get here: c went down past the bottom.
+    noteReport(view, 'c', { first: 0, last: 0, of: 2 })
+    noteReport(view, 'c', null)
+    // In b's reply: prev goes back to b, next on to c.
+    const span = viewSpan(ids, view.seen, view.sides)
+    expect(span).toEqual({ lo: 1, hi: 1.5, at: 1.5 })
+    expect(navTarget('prev', ids, null, span)?.id).toBe('b')
+    expect(navTarget('next', ids, null, span)?.id).toBe('c')
+  })
+
+  test('a row cut at the bottom that goes off screen went down past the bottom', () => {
+    const view = emptyViewport()
+    noteReport(view, 'c', { first: 0, last: 0, of: 3 })
+    noteReport(view, 'c', null)
+    expect(view.sides.get('c')).toBe('below')
+    expect(viewSpan(ids, view.seen, view.sides)).toEqual({ lo: -0.5, hi: 1.5, at: 1.5 })
+  })
+
+  test('a row shown whole and then gone keeps the side it had', () => {
+    const view = emptyViewport()
+    noteReport(view, 'c', { first: 0, last: 1, of: 2 })
+    noteReport(view, 'c', null)
+    expect(view.sides.has('c')).toBe(false)
+    expect(viewSpan(ids, view.seen, view.sides)).toBe(null)
+  })
+
+  test('after a button the prompts before the target are above and those after below', () => {
+    const view = emptyViewport()
+    noteReport(view, 'a', { first: 0, last: 0, of: 1 })
+    noteMove(view, ids, 2)
+    expect(view.seen.size).toBe(0)
+    expect([...view.sides]).toEqual([['a', 'above'], ['b', 'above'], ['d', 'below']])
+    // The cursor on c agrees with that.
+    const span = viewSpan(ids, view.seen, view.sides)
+    expect(navTarget('prev', ids, 'c', span)?.id).toBe('b')
+    expect(navTarget('next', ids, 'c', span)?.id).toBe('d')
+  })
+
+  test('sides that disagree tell nothing', () => {
+    const sides = new Map([['a', 'below'], ['c', 'above']] as const)
+    expect(viewSpan(ids, new Map(), sides)).toBe(null)
   })
 })

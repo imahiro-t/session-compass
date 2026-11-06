@@ -295,12 +295,65 @@ export type Seen = { readonly first: number; readonly last: number; readonly of:
  */
 export type ViewSpan = { lo: number; hi: number; at: number }
 
+/** Which side of the viewport a prompt row is on while it is off screen. */
+export type Side = 'above' | 'below'
+
+/**
+ * What the drawn prompt rows said of one surface's viewport: each row's last
+ * report (`seen`, null once off screen) and, for a row off screen, the side
+ * it left by (`sides`).
+ */
+export type Viewport = { seen: Map<string, Seen>; sides: Map<string, Side> }
+
+export function emptyViewport(): Viewport {
+  return { seen: new Map(), sides: new Map() }
+}
+
+/**
+ * Takes in one row's report. A row that goes off screen left by the edge it
+ * was cut at: its top cut, it went up past the top; its bottom cut, down past
+ * the bottom. A row shown whole that is gone the next report jumped out of
+ * view, and its side stays as it was.
+ */
+export function noteReport(view: Viewport, id: string, report: Seen): void {
+  const before = view.seen.get(id)
+  view.seen.set(id, report)
+  if (report !== null) {
+    view.sides.delete(id)
+    return
+  }
+  if (before === undefined || before === null) return
+  if (before.first > 0) view.sides.set(id, 'above')
+  else if (before.last < before.of - 1) view.sides.set(id, 'below')
+}
+
+/**
+ * Takes in a button's move to prompt `index`: the old reports no longer hold,
+ * the prompts before it are now above the viewport and those after it below,
+ * until the rows report otherwise.
+ */
+export function noteMove(view: Viewport, promptIds: readonly string[], index: number): void {
+  view.seen.clear()
+  view.sides.clear()
+  promptIds.forEach((id, i) => {
+    if (i < index) view.sides.set(id, 'above')
+    else if (i > index) view.sides.set(id, 'below')
+  })
+}
+
 /**
  * The span the viewport shows, from what the drawn prompt rows last reported;
- * null when no prompt row is on screen (the viewport is inside one long
- * turn, or nothing has reported).
+ * null when nothing tells where it is.
+ *
+ * With no prompt row on screen (the viewport inside a long reply), it is
+ * between the last prompt known to be above it and the first known to be
+ * below, in the turn of the one above: what the terminal's header names.
  */
-export function viewSpan(promptIds: readonly string[], seen: ReadonlyMap<string, Seen>): ViewSpan | null {
+export function viewSpan(
+  promptIds: readonly string[],
+  seen: ReadonlyMap<string, Seen>,
+  sides: ReadonlyMap<string, Side> = new Map(),
+): ViewSpan | null {
   let v = -1
   let w = -1
   for (let i = 0; i < promptIds.length; i++) {
@@ -309,7 +362,21 @@ export function viewSpan(promptIds: readonly string[], seen: ReadonlyMap<string,
     if (v === -1) v = i
     w = i
   }
-  if (v === -1) return null
+  if (v === -1) {
+    let above = -1
+    let below = -1
+    for (let i = 0; i < promptIds.length; i++) {
+      const side = sides.get(promptIds[i]!)
+      if (side === 'above') above = i
+      else if (side === 'below' && below === -1) below = i
+    }
+    if (above === -1 && below === -1) return null
+    // Rows that disagree (one below another above it) tell nothing.
+    if (above !== -1 && below !== -1 && above >= below) return null
+    const lo = above === -1 ? -0.5 : above
+    const hi = below === -1 ? promptIds.length - 0.5 : below - 0.5
+    return { lo, hi, at: above === -1 ? below - 0.5 : above + 0.5 }
+  }
   const top = seen.get(promptIds[v]!)!
   // Its row's top scrolled away: the viewport is in prompt v's turn.
   if (top.first > 0) return { lo: v, hi: w + 0.5, at: v + 0.5 }

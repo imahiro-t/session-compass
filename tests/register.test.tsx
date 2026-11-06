@@ -548,9 +548,17 @@ test('after scrolling by hand, the buttons step from the prompt on screen', asyn
   await drawRow($, 'u2', 'two', { first: 3, last: 3, of: 4 })
   await drawRow($, 'u3', 'three', { first: 0, last: 1, of: 2 })
   await ui.press({ key: 'next' })
-  // With no prompt row on screen, the cursor (still the end here) counts.
+  // Scrolled down by hand until u3's row went up past the top: no prompt row
+  // is on screen, and the viewport is in u3's reply.
+  await drawRow($, 'u2', 'two', null)
+  await drawRow($, 'u3', 'three', { first: 1, last: 1, of: 2 })
+  await drawRow($, 'u3', 'three', null)
+  // u4 is further down, its row still below the bottom.
+  await drawRow($, 'u4', 'four', { first: 0, last: 0, of: 2 })
+  await drawRow($, 'u4', 'four', null)
   await ui.press({ key: 'prev' })
-  expect(calls.scroll).toEqual(['u2', 'u3', 'u4'])
+  await ui.press({ key: 'next' })
+  expect(calls.scroll).toEqual(['u2', 'u3', 'u3', 'u4'])
   await ui.unmount()
 })
 
