@@ -24,6 +24,7 @@ import type { NavKind, Seen } from './logic'
 const FIRST_PROMPT = { plugin: 'session-compass', key: 'firstPrompt' } as const
 const SUMMARY = { plugin: 'session-compass', key: 'summary' } as const
 const NAV = { plugin: 'session-compass', key: 'nav' } as const
+const HEADS = { plugin: 'session-compass', key: 'heads' } as const
 
 const firstPromptAtom = atom(FIRST_PROMPT, null)
 const summaryAtom = atom(SUMMARY, { status: 'idle' })
@@ -68,6 +69,38 @@ const renderBuffer = new Map<string, string>()
 // surface: where the person has scrolled to, read when a button is pressed.
 // Kept here, not in state, for the same reason as renderBuffer.
 const seenBySurface = new Map<string, Map<string, Seen>>()
+
+// The person's prompt appended last whose reply has drawn no row yet, the
+// rows of replies drawn so far, and the reply heads found and not yet stored:
+// a prompt's head is the first new reply row drawn after it.
+let awaitingHead: string | null = null
+const drawnReplies = new Set<string>()
+const headBuffer = new Map<string, string>()
+
+function noteReplyRow(requestId: string): void {
+  if (drawnReplies.has(requestId)) return
+  drawnReplies.add(requestId)
+  if (awaitingHead === null || !isStopId(requestId)) return
+  headBuffer.set(awaitingHead, requestId)
+  awaitingHead = null
+}
+
+/** Stores the reply heads found while drawing; a lost race keeps them buffered. */
+async function mergeHeads($: Dollar): Promise<void> {
+  if (headBuffer.size === 0) return
+  const found = [...headBuffer]
+  const held = await $.state.get(HEADS)
+  const heads = held.value ?? {}
+  if (found.every(([id, head]) => heads[id] === head)) {
+    for (const [id] of found) headBuffer.delete(id)
+    return
+  }
+  const written = await $.state.set(HEADS, { ...heads, ...Object.fromEntries(found) }, { ifVersion: held.version })
+  if (!written.isSet) return
+  for (const [id, head] of found) {
+    if (headBuffer.get(id) === head) headBuffer.delete(id)
+  }
+}
 
 function seenOn(surface: string): Map<string, Seen> {
   let seen = seenBySurface.get(surface)
@@ -239,6 +272,7 @@ async function onStart($: Dollar): Promise<void> {
   }
   if (prompt !== null) await startSummary($, prompt)
   await mergeBuffer($)
+  await mergeHeads($)
 }
 
 async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
@@ -259,7 +293,18 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     // What the rows said of the old viewport no longer holds once it moves;
     // the rows the scroll brings on screen report afresh.
     seen.clear()
-    const scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
+    // The reply's first row on top puts the prompt's own row just above it,
+    // where the terminal's header names it, as when the person scrolls there.
+    // A prompt whose reply was not drawn in this session lands on its own row.
+    const head = headBuffer.get(target.id) ?? (await $.state.get(HEADS)).value?.[target.id]
+    let scrolled = { deny: 'no reply row' } as { deny?: string }
+    if (head !== undefined) {
+      debug($, `asks for the reply row ${head}`)
+      scrolled = await $.ui.scroll({ to: { requestId: head }, block: 'start' })
+      if (scrolled.deny === undefined) debug($, `landed on the reply row ${head}`)
+      else debug($, `could not scroll to the reply row ${head}: ${scrolled.deny}`)
+    }
+    if (scrolled.deny !== undefined) scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
     if (scrolled.deny !== undefined) {
       debug($, `could not scroll to the prompt: ${scrolled.deny}`)
       return
@@ -298,6 +343,7 @@ export const register: Register = on => {
         if (await fixFirstPrompt($, kept)) await startSummary($, kept)
       }
       await mergeBuffer($)
+      await mergeHeads($)
     })
     return result
   }).catch(($, e, next) => next(e))
@@ -311,9 +357,11 @@ export const register: Register = on => {
       isOwnPrompt(e.origin) &&
       result.deny === undefined
     const { uuid } = e
+    if (isOwn) awaitingHead = uuid
     later($, 'session.append', async () => {
       if (isOwn) await writeNav($, 'new prompt', nav => withLivePrompt(nav, uuid))
       await mergeBuffer($)
+      await mergeHeads($)
     })
     return result
   }).catch(($, e, next) => next(e))
@@ -327,6 +375,16 @@ export const register: Register = on => {
         seenOn(e.surface).set(e.requestId, e.props.onScreen)
       }
     }
+    return next(e)
+  })
+
+  on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
+    noteReplyRow(e.requestId)
+    return next(e)
+  })
+
+  on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
+    noteReplyRow(e.requestId)
     return next(e)
   })
 

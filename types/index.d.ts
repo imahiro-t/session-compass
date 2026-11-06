@@ -40,6 +40,12 @@ declare module 'claude-code' {
       firstPrompt: string | null
       summary: Summary
       nav: Nav
+      /**
+       * Prompt id to the id of the first row of its reply (an assistant
+       * message or a tool call), drawn after it in this session: where a
+       * button lands, so the prompt's own row sits just above the viewport.
+       */
+      heads: Record<string, string>
     }
   }
 }
