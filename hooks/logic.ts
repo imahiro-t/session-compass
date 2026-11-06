@@ -130,32 +130,62 @@ export function bandText(
   return { kind: 'empty', text: oneLine(EMPTY_TEXT, maxWidth) }
 }
 
+/**
+ * Rows of `$.session.messages()` that are machinery, not something the person
+ * typed: a slash command's expansion, a command's local output, a
+ * notification or a reminder the engine filed as a user row.
+ */
+const MACHINE_ROW = /^<(command-|local-command-|task-notification|system-reminder)/
+
 /** The person's prompt rows of `$.session.messages()`, oldest first. */
 export function userPromptTexts(
   messages: readonly { role: string; text: string; toolResults?: readonly unknown[] }[],
 ): string[] {
   return messages
-    .filter(m => m.role === 'user' && (m.toolResults?.length ?? 0) === 0 && m.text.trim() !== '')
+    .filter(m => m.role === 'user' && (m.toolResults?.length ?? 0) === 0)
     .map(m => m.text.trim())
+    .filter(text => text !== '' && !MACHINE_ROW.test(text))
+}
+
+/**
+ * A short fingerprint of a prompt's text, what drawn rows and transcript rows
+ * are matched by: the length (in code points) of the text on one line, and an
+ * FNV-1a hash of it. A few dozen bytes whatever the prompt's size, so the nav
+ * kept in `$.state` stays small however long the pasted prompts are.
+ */
+export function promptKey(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  let hash = 0x811c9dc5
+  let length = 0
+  for (const ch of flat) {
+    const point = ch.codePointAt(0) ?? 0
+    hash = Math.imul(hash ^ point, 0x01000193) >>> 0
+    length += 1
+  }
+  return `${length}:${hash.toString(16).padStart(8, '0')}`
 }
 
 /**
  * Orders prompts seen only by their drawn rows by when they were said: each
- * takes the earliest not-yet-taken transcript row whose text matches its own.
- * Those that match none come first, in the order they were seen.
+ * takes the earliest not-yet-taken transcript row whose fingerprint matches
+ * its own. Those that match none come first, in the order they were seen.
+ *
+ * `$.session.messages()` holds only the newest 4096 entries, so in a longer
+ * session a drawn prompt older than those matches nothing and is placed among
+ * the unmatched ones, by the order it was drawn: there is no other source for
+ * the order of rows that old.
  */
 export function orderPast(
   past: readonly PastPrompt[],
-  userTexts: readonly string[],
+  transcriptKeys: readonly string[],
 ): PastPrompt[] {
   const taken = new Set<number>()
   const matched: { prompt: PastPrompt; at: number }[] = []
   const unmatched: PastPrompt[] = []
   for (const prompt of past) {
-    const text = prompt.text.trim()
     let at = -1
-    for (let i = 0; i < userTexts.length; i++) {
-      if (!taken.has(i) && userTexts[i] === text) {
+    for (let i = 0; i < transcriptKeys.length; i++) {
+      if (!taken.has(i) && transcriptKeys[i] === prompt.key) {
         at = i
         break
       }
@@ -205,10 +235,10 @@ export function unknownPrompts(nav: Nav, drawn: readonly PastPrompt[]): PastProm
  * The nav with drawn prompts it did not know merged into `pastPrompts`, in
  * the order `orderPast` gives them. Null when there are none to add.
  */
-export function withPastPrompts(nav: Nav, drawn: readonly PastPrompt[], userTexts: readonly string[]): Nav | null {
+export function withPastPrompts(nav: Nav, drawn: readonly PastPrompt[], transcriptKeys: readonly string[]): Nav | null {
   const added = unknownPrompts(nav, drawn)
   if (added.length === 0) return null
-  const pastPrompts = orderPast([...nav.pastPrompts, ...added], userTexts)
+  const pastPrompts = orderPast([...nav.pastPrompts, ...added], transcriptKeys)
   return { ...nav, pastPrompts, promptIds: promptIdsOf(pastPrompts, nav.liveIds) }
 }
 
@@ -217,13 +247,20 @@ export type NavKind = 'first' | 'prev' | 'next' | 'latest'
 export type NavMove = {
   /** The index in `promptIds` to scroll to. */
   index: number
-  /** What `cursorId` becomes once the scroll landed (`null`: at the latest). */
-  cursorId: string | null
+  /** The prompt there: what to scroll to, and what `cursorId` becomes once the scroll landed. */
+  id: string
 }
 
 /**
  * Where a button goes, or null when there is nowhere to go (no prompts yet,
- * or "next" while already at the latest). Always an index inside the list.
+ * or "next" while at the end of the transcript). Always an index inside the
+ * list.
+ *
+ * `cursorId` null (or an id no longer listed) is the end of the transcript,
+ * below the newest prompt: where a session starts and where a new prompt
+ * leaves it. "prev" from there goes to the newest prompt. "latest" lands on
+ * the newest prompt itself, so the cursor names it and "prev" next goes one
+ * further back.
  */
 export function navTarget(kind: NavKind, promptIds: readonly string[], cursorId: string | null): NavMove | null {
   const n = promptIds.length
@@ -243,11 +280,11 @@ export function navTarget(kind: NavKind, promptIds: readonly string[], cursorId:
       index = Math.min(n - 1, cursor + 1)
       break
     case 'latest':
-      return { index: n - 1, cursorId: null }
+      index = n - 1
+      break
   }
   const id = promptIds[index]
-  if (id === undefined) return null
-  return { index, cursorId: id }
+  return id === undefined ? null : { index, id }
 }
 
 /** A model reply as one clean line, or null when nothing is left. */
@@ -259,6 +296,12 @@ export function summaryLine(reply: string): string | null {
 /** The prompt text sent for the summary: long prompts are cut. */
 export const SUMMARY_INPUT_LIMIT = 4000
 
+/**
+ * The prompt cut to SUMMARY_INPUT_LIMIT code points (never inside a surrogate
+ * pair), an ellipsis after when it was longer. Cutting twice gives the same
+ * text as cutting once.
+ */
 export function summaryInput(prompt: string): string {
-  return prompt.length > SUMMARY_INPUT_LIMIT ? `${prompt.slice(0, SUMMARY_INPUT_LIMIT)}…` : prompt
+  const points = Array.from(prompt)
+  return points.length > SUMMARY_INPUT_LIMIT ? `${points.slice(0, SUMMARY_INPUT_LIMIT).join('')}…` : prompt
 }

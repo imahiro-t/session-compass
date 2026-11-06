@@ -13,8 +13,11 @@ export type Summary =
   | { status: 'done'; text: string }
   | { status: 'failed'; reason: string }
 
-/** A prompt seen only by drawing its transcript row (e.g. after a resume). */
-export type PastPrompt = { id: string; text: string }
+/**
+ * A prompt seen only by drawing its transcript row (e.g. after a resume):
+ * its id and the fingerprint of its text (`promptKey`), never the text itself.
+ */
+export type PastPrompt = { id: string; key: string }
 
 /**
  * Everything the navigation buttons read, kept under one key so it is always
@@ -27,7 +30,7 @@ export type Nav = {
   pastPrompts: PastPrompt[]
   /** What the buttons step through, oldest first: ordered past, then live. */
   promptIds: string[]
-  /** The id of the prompt last moved to; null means "at the latest". */
+  /** The id of the prompt last moved to; null means the end of the transcript. */
   cursorId: string | null
 }
 

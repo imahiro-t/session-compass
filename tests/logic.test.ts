@@ -9,6 +9,7 @@ import {
   navTarget,
   oneLine,
   orderPast,
+  promptKey,
   summaryInput,
   summaryLine,
   textWidth,
@@ -84,47 +85,52 @@ describe('bandText', () => {
   })
 })
 
+/** A drawn prompt as the buffer holds it: its id and its text's fingerprint. */
+const drawnRow = (id: string, text: string) => ({ id, key: promptKey(text) })
+const keysOf = (texts: readonly string[]) => texts.map(promptKey)
+
+describe('promptKey', () => {
+  test('the same text on one line gives the same key, another text another', () => {
+    expect(promptKey(' fix\n  the bug ')).toBe(promptKey('fix the bug'))
+    expect(promptKey('fix the bug')).not.toBe(promptKey('fix the bugs'))
+    expect(promptKey('ログイン')).toMatch(/^4:[0-9a-f]{8}$/)
+  })
+
+  test('a huge prompt still gives a short key', () => {
+    expect(promptKey('x'.repeat(1_000_000)).length).toBeLessThan(20)
+  })
+})
+
 describe('orderPast', () => {
-  const texts = ['one', 'two', 'three']
+  const texts = keysOf(['one', 'two', 'three'])
 
   test('rows drawn newest first come out in the order they were said', () => {
-    const drawn = [
-      { id: 'c', text: 'three' },
-      { id: 'b', text: 'two' },
-      { id: 'a', text: 'one' },
-    ]
+    const drawn = [drawnRow('c', 'three'), drawnRow('b', 'two'), drawnRow('a', 'one')]
     expect(orderPast(drawn, texts).map(p => p.id)).toEqual(['a', 'b', 'c'])
   })
 
   test('the same text twice takes the earliest rows in turn', () => {
-    const drawn = [
-      { id: 'y', text: 'again' },
-      { id: 'x', text: 'again' },
-    ]
-    expect(orderPast(drawn, ['again', 'other', 'again']).map(p => p.id)).toEqual(['y', 'x'])
+    const drawn = [drawnRow('y', 'again'), drawnRow('x', 'again')]
+    expect(orderPast(drawn, keysOf(['again', 'other', 'again'])).map(p => p.id)).toEqual(['y', 'x'])
   })
 
   test('rows that match nothing come first, in the order they were seen', () => {
-    const drawn = [
-      { id: 'b', text: 'two' },
-      { id: 'q', text: 'unknown 1' },
-      { id: 'r', text: 'unknown 2' },
-    ]
+    const drawn = [drawnRow('b', 'two'), drawnRow('q', 'unknown 1'), drawnRow('r', 'unknown 2')]
     expect(orderPast(drawn, texts).map(p => p.id)).toEqual(['q', 'r', 'b'])
   })
 
-  test('text is compared trimmed', () => {
-    expect(orderPast([{ id: 'a', text: ' two\n' }, { id: 'b', text: 'one' }], texts).map(p => p.id)).toEqual(['b', 'a'])
+  test('text is compared on one line, trimmed', () => {
+    expect(orderPast([drawnRow('a', ' two\n'), drawnRow('b', 'one')], texts).map(p => p.id)).toEqual(['b', 'a'])
   })
 })
 
 describe('the nav', () => {
   test('a live prompt goes last once, leaves the past list and resets the cursor', () => {
-    const nav = { ...EMPTY_NAV, pastPrompts: [{ id: 'p', text: 'old' }, { id: 'x', text: 'new' }], cursorId: 'p' }
+    const nav = { ...EMPTY_NAV, pastPrompts: [drawnRow('p', 'old'), drawnRow('x', 'new')], cursorId: 'p' }
     const next = withLivePrompt(nav, 'x')
     expect(next).toEqual({
       liveIds: ['x'],
-      pastPrompts: [{ id: 'p', text: 'old' }],
+      pastPrompts: [drawnRow('p', 'old')],
       promptIds: ['p', 'x'],
       cursorId: null,
     })
@@ -133,20 +139,19 @@ describe('the nav', () => {
 
   test('drawn prompts already known change nothing', () => {
     const nav = { ...EMPTY_NAV, liveIds: ['a'], promptIds: ['a'] }
-    expect(withPastPrompts(nav, [{ id: 'a', text: 'x' }], [])).toBe(null)
+    expect(withPastPrompts(nav, [drawnRow('a', 'x')], [])).toBe(null)
   })
 
   test('new drawn prompts go before the live ones, in transcript order', () => {
     const nav = { ...EMPTY_NAV, liveIds: ['l'], promptIds: ['l'] }
-    const next = withPastPrompts(
-      nav,
-      [
-        { id: 'b', text: 'two' },
-        { id: 'a', text: 'one' },
-      ],
-      ['one', 'two', 'live'],
-    )
+    const next = withPastPrompts(nav, [drawnRow('b', 'two'), drawnRow('a', 'one')], keysOf(['one', 'two', 'live']))
     expect(next?.promptIds).toEqual(['a', 'b', 'l'])
+  })
+
+  test('the nav keeps fingerprints, never the prompts\' text', () => {
+    const huge = 'log line\n'.repeat(100_000)
+    const next = withPastPrompts(EMPTY_NAV, [drawnRow('a', huge)], keysOf([huge]))
+    expect(JSON.stringify(next).length).toBeLessThan(200)
   })
 
   test('userPromptTexts keeps the person\'s rows only', () => {
@@ -156,6 +161,8 @@ describe('the nav', () => {
         { role: 'assistant', text: 'hello' },
         { role: 'user', text: '', toolResults: [] },
         { role: 'user', text: 'result', toolResults: [{}] },
+        { role: 'user', text: '<command-name>/clear</command-name>' },
+        { role: 'user', text: '<task-notification>done</task-notification>' },
         { role: 'user', text: 'bye' },
       ]),
     ).toEqual(['hi', 'bye'])
@@ -172,24 +179,32 @@ describe('navTarget', () => {
   })
 
   test('first and latest', () => {
-    expect(navTarget('first', ids, null)).toEqual({ index: 0, cursorId: 'a' })
-    expect(navTarget('latest', ids, 'a')).toEqual({ index: 2, cursorId: null })
+    expect(navTarget('first', ids, null)).toEqual({ index: 0, id: 'a' })
+    expect(navTarget('latest', ids, 'a')).toEqual({ index: 2, id: 'c' })
+    expect(navTarget('latest', ids, null)).toEqual({ index: 2, id: 'c' })
   })
 
-  test('prev from the latest goes to the newest prompt, and stops at the first', () => {
-    expect(navTarget('prev', ids, null)).toEqual({ index: 2, cursorId: 'c' })
-    expect(navTarget('prev', ids, 'b')).toEqual({ index: 0, cursorId: 'a' })
-    expect(navTarget('prev', ids, 'a')).toEqual({ index: 0, cursorId: 'a' })
+  test('after latest, prev goes one before the newest prompt and next stays on it', () => {
+    const latest = navTarget('latest', ids, null)
+    expect(latest?.id).toBe('c')
+    expect(navTarget('prev', ids, latest?.id ?? null)).toEqual({ index: 1, id: 'b' })
+    expect(navTarget('next', ids, latest?.id ?? null)).toEqual({ index: 2, id: 'c' })
   })
 
-  test('next at the latest does nothing, and stops at the last', () => {
+  test('prev from the end of the transcript goes to the newest prompt, and stops at the first', () => {
+    expect(navTarget('prev', ids, null)).toEqual({ index: 2, id: 'c' })
+    expect(navTarget('prev', ids, 'b')).toEqual({ index: 0, id: 'a' })
+    expect(navTarget('prev', ids, 'a')).toEqual({ index: 0, id: 'a' })
+  })
+
+  test('next at the end of the transcript does nothing, and stops at the last', () => {
     expect(navTarget('next', ids, null)).toBe(null)
-    expect(navTarget('next', ids, 'a')).toEqual({ index: 1, cursorId: 'b' })
-    expect(navTarget('next', ids, 'c')).toEqual({ index: 2, cursorId: 'c' })
+    expect(navTarget('next', ids, 'a')).toEqual({ index: 1, id: 'b' })
+    expect(navTarget('next', ids, 'c')).toEqual({ index: 2, id: 'c' })
   })
 
-  test('a cursor no longer in the list counts as at the latest', () => {
-    expect(navTarget('prev', ids, 'gone')).toEqual({ index: 2, cursorId: 'c' })
+  test('a cursor no longer in the list counts as the end of the transcript', () => {
+    expect(navTarget('prev', ids, 'gone')).toEqual({ index: 2, id: 'c' })
     expect(navTarget('next', ids, 'gone')).toBe(null)
   })
 })
@@ -203,5 +218,12 @@ describe('summary text', () => {
   test('a long prompt is cut before it is sent', () => {
     expect(summaryInput('x'.repeat(5000)).length).toBe(4001)
     expect(summaryInput('short')).toBe('short')
+  })
+
+  test('the cut never splits an emoji, and cutting twice changes nothing', () => {
+    const cut = summaryInput('😀'.repeat(5000))
+    expect(Array.from(cut).length).toBe(4001)
+    expect(cut.endsWith('😀…')).toBe(true)
+    expect(summaryInput(cut)).toBe(cut)
   })
 })

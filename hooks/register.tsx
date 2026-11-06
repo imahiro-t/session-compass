@@ -7,8 +7,10 @@ import {
   bandText,
   isOwnPrompt,
   navTarget,
+  promptKey,
   summaryInput,
   summaryLine,
+  unknownPrompts,
   userPromptTexts,
   withLivePrompt,
   withPastPrompts,
@@ -34,8 +36,17 @@ const BUTTONS: readonly { kind: NavKind; label: string }[] = [
   { kind: 'latest', label: '⏬' },
 ]
 
-/** Cells the button row takes on the terminal: `[ ⏫ ]` is 6, plus 1 between each, plus 1 before. */
-const BUTTONS_WIDTH = BUTTONS.length * 6 + BUTTONS.length
+/** Cells one button takes on the terminal: `[ ⏫ ]`. */
+const BUTTON_CELLS = 6
+/** Cells between two buttons (the row's `gap`). */
+const BUTTON_GAP = 1
+/** Cells between the summary and the buttons (the row's `marginLeft`). */
+const BUTTONS_MARGIN = 1
+/** Cells the whole button row takes, the margin before it included. */
+const BUTTONS_WIDTH = BUTTONS.length * BUTTON_CELLS + (BUTTONS.length - 1) * BUTTON_GAP + BUTTONS_MARGIN
+
+/** `$.session.messages()` returns at most this many entries, the newest. */
+const MESSAGES_LIMIT = 4096
 
 type Dollar = EngineInterface
 
@@ -43,47 +54,87 @@ type Dollar = EngineInterface
 // token was started by an environment that is gone (reload, respawn).
 const envToken = crypto.randomUUID()
 
-// Prompts seen by drawing their rows. A render hook may not write state, so
-// they wait here until a hook outside drawing merges them (mergeBuffer).
-// A reload empties it; the rows fire `UserMessage` again when redrawn.
+// Prompts seen by drawing their rows, id to fingerprint (`promptKey`). A
+// render hook may not write state, so they wait here until a hook outside
+// drawing merges them (mergeBuffer). A reload empties it; the rows fire
+// `UserMessage` again when redrawn.
 const renderBuffer = new Map<string, string>()
 
-/** Writes the nav with one compare-and-set; `change` null means no write. */
-async function writeNav($: Dollar, change: (nav: Nav) => Nav | null): Promise<void> {
+function debug($: Dollar, text: string): void {
+  $.ui.log(`session-compass: ${text}`, { to: 'debug' })
+}
+
+/**
+ * Runs `work` on a timer, off the hook's dispatch: the hook answers at once
+ * and nothing the person waits on (a prompt, a transcript row) waits on it.
+ */
+function later($: Dollar, what: string, work: () => Promise<void>): void {
+  $.clock.after(0, () => {
+    work().catch(error => debug($, `${what} failed: ${String(error)}`))
+  })
+}
+
+/**
+ * Writes the nav with one compare-and-set; `change` null means no write is
+ * needed. True once the nav holds the change, false when three tries all
+ * lost the race (said in the debug log).
+ */
+async function writeNav($: Dollar, what: string, change: (nav: Nav) => Nav | null): Promise<boolean> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const held = await $.state.get(NAV)
     const next = change(held.value ?? EMPTY_NAV)
-    if (next === null) return
+    if (next === null) return true
     const written = await $.state.set(NAV, next, { ifVersion: held.version })
-    if (written.isSet) return
+    if (written.isSet) return true
   }
+  debug($, `gave up writing the nav (${what}): three writes lost the race`)
+  return false
+}
+
+/**
+ * The person's prompts in the transcript, oldest first, and whether that is
+ * the whole transcript: `$.session.messages()` holds the newest 4096 entries
+ * only, so a full answer may have lost its head.
+ */
+async function transcriptPrompts($: Dollar): Promise<{ texts: string[]; isWhole: boolean }> {
+  const messages = await $.session.messages()
+  if ('deny' in messages) return { texts: [], isWhole: false }
+  return { texts: userPromptTexts(messages), isWhole: messages.length < MESSAGES_LIMIT }
 }
 
 /**
  * Moves the prompts drawn rows showed into the nav. Reads the transcript
- * (to order them) only when one of them is new to the nav.
+ * (to order them) only when one of them is new to the nav. A drawn prompt
+ * leaves the buffer only once the nav holds it, so a failed write loses none.
  */
 async function mergeBuffer($: Dollar): Promise<void> {
   if (renderBuffer.size === 0) return
-  const drawn: PastPrompt[] = [...renderBuffer].map(([id, text]) => ({ id, text }))
-  for (const p of drawn) renderBuffer.delete(p.id)
+  const drawn: PastPrompt[] = [...renderBuffer].map(([id, key]) => ({ id, key }))
   const held = await $.state.get(NAV)
-  const nav = held.value ?? EMPTY_NAV
-  if (withPastPrompts(nav, drawn, []) === null) return
-  const messages = await $.session.messages()
-  const texts = 'deny' in messages ? [] : userPromptTexts(messages)
-  await writeNav($, current => withPastPrompts(current, drawn, texts))
+  let isHeld = unknownPrompts(held.value ?? EMPTY_NAV, drawn).length === 0
+  if (!isHeld) {
+    const keys = (await transcriptPrompts($)).texts.map(promptKey)
+    isHeld = await writeNav($, 'drawn prompts', current => withPastPrompts(current, drawn, keys))
+  }
+  if (!isHeld) return
+  for (const p of drawn) {
+    // A row drawn again meanwhile with another text stays for the next merge.
+    if (renderBuffer.get(p.id) === p.key) renderBuffer.delete(p.id)
+  }
 }
 
-/** Runs the one summary of the session, if this caller wins the right to. */
+/**
+ * Runs the one summary of the session, if this caller wins the right to.
+ * Called from timers only (onStart, the prompt.submit follow-up).
+ */
 async function startSummary($: Dollar, prompt: string): Promise<void> {
   const held = await $.state.get(SUMMARY)
   if (held.value !== undefined && held.value.status !== 'idle') return
   const pending: Summary = { status: 'pending', token: envToken }
   const won = await $.state.set(SUMMARY, pending, { ifVersion: held.version })
   if (!won.isSet) return
-  // A timer, not the hook's own dispatch, carries the model call: it is not
-  // cut short when the hook that started it settles, and nothing waits on it.
+  // A timer of its own carries the model call: nothing waits on it, and it is
+  // not cut short when whatever started it settles.
   $.clock.after(0, () => {
     void runSummary($, prompt, won.version)
   })
@@ -109,20 +160,26 @@ async function runSummary($: Dollar, prompt: string, pendingVersion: number): Pr
   } catch (error) {
     result = { status: 'failed', reason: error instanceof Error ? error.message : String(error) }
   }
+  if (result.status === 'failed') debug($, `the summary failed: ${result.reason}`)
   try {
     // Written only over our own `pending`: if anything wrote since (it was
     // marked interrupted), the version moved and this write misses.
-    await $.state.set(SUMMARY, result, { ifVersion: pendingVersion })
+    const written = await $.state.set(SUMMARY, result, { ifVersion: pendingVersion })
+    if (!written.isSet) debug($, `the summary result was dropped: the summary changed while it ran`)
   } catch (error) {
-    $.ui.log(`session-compass: could not store the summary: ${String(error)}`, { to: 'debug' })
+    debug($, `could not store the summary: ${String(error)}`)
   }
 }
 
-/** Fixes the first prompt once; true when this call fixed it. */
-async function fixFirstPrompt($: Dollar, text: string): Promise<boolean> {
+/**
+ * Fixes the first prompt once; true when this call fixed it. What is kept is
+ * the prompt as the summary is sent it (cut to SUMMARY_INPUT_LIMIT), so a
+ * huge first prompt does not sit whole in the state.
+ */
+async function fixFirstPrompt($: Dollar, prompt: string): Promise<boolean> {
   const held = await $.state.get(FIRST_PROMPT)
   if (held.value !== undefined && held.value !== null) return false
-  const written = await $.state.set(FIRST_PROMPT, text, { ifVersion: held.version })
+  const written = await $.state.set(FIRST_PROMPT, prompt, { ifVersion: held.version })
   return written.isSet
 }
 
@@ -131,21 +188,28 @@ async function onStart($: Dollar): Promise<void> {
   // A summary another environment left pending can never finish now.
   const summary = await $.state.get(SUMMARY)
   if (summary.value?.status === 'pending' && summary.value.token !== envToken) {
-    await $.state.set(
+    const marked = await $.state.set(
       SUMMARY,
       { status: 'failed', reason: 'interrupted' },
       { ifVersion: summary.version },
     )
+    if (marked.isSet) debug($, 'a summary an earlier environment left pending is marked interrupted')
   }
 
-  // A resumed session has prompts this process never saw submitted.
+  // A resumed session has prompts this process never saw submitted. Only a
+  // whole transcript names its first prompt: past 4096 entries the head is
+  // gone, and the oldest prompt left is not the session's first.
   const first = await $.state.get(FIRST_PROMPT)
   let prompt = first.value ?? null
   if (prompt === null) {
-    const messages = await $.session.messages()
-    const texts = 'deny' in messages ? [] : userPromptTexts(messages)
+    const { texts, isWhole } = await transcriptPrompts($)
     const found = texts[0]
-    if (found !== undefined && (await fixFirstPrompt($, found))) prompt = found
+    if (!isWhole) {
+      debug($, 'the transcript is longer than $.session.messages() returns: its first prompt is not known')
+    } else if (found !== undefined) {
+      const kept = summaryInput(found)
+      if (await fixFirstPrompt($, kept)) prompt = kept
+    }
   }
   if (prompt !== null) await startSummary($, prompt)
   await mergeBuffer($)
@@ -158,19 +222,17 @@ async function move($: Dollar, kind: NavKind): Promise<void> {
     const nav = held.value ?? EMPTY_NAV
     const target = navTarget(kind, nav.promptIds, nav.cursorId)
     if (target === null) return
-    const id = nav.promptIds[target.index]
-    if (id === undefined) return
-    $.ui.log(`session-compass: ${kind} scrolls to ${id}`, { to: 'debug' })
-    const scrolled = await $.ui.scroll({ to: { requestId: id }, block: 'start' })
+    debug($, `${kind} scrolls to ${target.id}`)
+    const scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
     if (scrolled.deny !== undefined) {
-      $.ui.log(`session-compass: could not scroll to the prompt: ${scrolled.deny}`, { to: 'debug' })
+      debug($, `could not scroll to the prompt: ${scrolled.deny}`)
       return
     }
-    await writeNav($, current =>
-      current.cursorId === target.cursorId ? null : { ...current, cursorId: target.cursorId },
+    await writeNav($, 'cursor', current =>
+      current.cursorId === target.id ? null : { ...current, cursorId: target.id },
     )
   } catch (error) {
-    $.ui.log(`session-compass: navigation failed: ${String(error)}`, { to: 'debug' })
+    debug($, `navigation failed: ${String(error)}`)
   }
 }
 
@@ -178,47 +240,44 @@ export const register: Register = on => {
   on('session.start', ($, e, next) => {
     // The first `session.start` is awaited before the first prompt: nothing
     // slow runs in it. The work goes to a timer.
-    $.clock.after(0, () => {
-      onStart($).catch(error => $.ui.log(`session-compass: start failed: ${String(error)}`, { to: 'debug' }))
-    })
+    later($, 'start', () => onStart($))
     return next(e)
   })
 
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
-    try {
-      const text = e.text.trim()
-      const isFirstCandidate =
-        !('drop' in result && result.drop !== undefined) &&
-        e.command === undefined &&
-        e.isMeta === undefined &&
-        isOwnPrompt(e.origin) &&
-        text !== ''
-      if (isFirstCandidate && (await fixFirstPrompt($, text))) {
-        await startSummary($, text)
+    // Only what is read off the event is judged here; every state read and
+    // write runs on a timer, so the prompt goes on without waiting for them.
+    const text = e.text.trim()
+    const isFirstCandidate =
+      !('drop' in result && result.drop !== undefined) &&
+      e.command === undefined &&
+      e.isMeta === undefined &&
+      isOwnPrompt(e.origin) &&
+      text !== ''
+    later($, 'prompt.submit', async () => {
+      if (isFirstCandidate) {
+        const kept = summaryInput(text)
+        if (await fixFirstPrompt($, kept)) await startSummary($, kept)
       }
       await mergeBuffer($)
-    } catch (error) {
-      $.ui.log(`session-compass: prompt.submit failed: ${String(error)}`, { to: 'debug' })
-    }
+    })
     return result
   }).catch(($, e, next) => next(e))
 
   on('session.append', { door: 'prompt' }, async ($, e, next) => {
     const result = await next(e)
-    try {
-      const isOwn =
-        e.agentId === undefined &&
-        e.message.type === 'user' &&
-        e.message.isMeta === undefined &&
-        isOwnPrompt(e.origin)
-      if (isOwn && result.deny === undefined) {
-        await writeNav($, nav => withLivePrompt(nav, e.uuid))
-      }
+    const isOwn =
+      e.agentId === undefined &&
+      e.message.type === 'user' &&
+      e.message.isMeta === undefined &&
+      isOwnPrompt(e.origin) &&
+      result.deny === undefined
+    const { uuid } = e
+    later($, 'session.append', async () => {
+      if (isOwn) await writeNav($, 'new prompt', nav => withLivePrompt(nav, uuid))
       await mergeBuffer($)
-    } catch (error) {
-      $.ui.log(`session-compass: session.append failed: ${String(error)}`, { to: 'debug' })
-    }
+    })
     return result
   }).catch(($, e, next) => next(e))
 
@@ -226,7 +285,7 @@ export const register: Register = on => {
     // Drawing may not write state: remember the row, merge it later.
     const { origin, task, from, text } = e.props
     if (isOwnPrompt(origin, { task, from }) && text.trim() !== '') {
-      renderBuffer.set(e.requestId, text)
+      renderBuffer.set(e.requestId, promptKey(text))
     }
     return next(e)
   })
@@ -251,7 +310,7 @@ export const register: Register = on => {
             {left.note === undefined ? '' : <Text dimColor>{left.note}</Text>}
           </Text>
         </Box>
-        <Box flexDirection="row" flexShrink={0} gap={1} marginLeft={1}>
+        <Box flexDirection="row" flexShrink={0} gap={BUTTON_GAP} marginLeft={BUTTONS_MARGIN}>
           {BUTTONS.map(b => (
             <Button
               key={b.kind}
