@@ -235,10 +235,10 @@ test('after latest, prev steps to the prompt before the newest and next comes ba
     return { value: { isSet: true, version: written.version } }
   })
   const cursor = () => (store.get('nav')?.value as Nav).cursorId
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   // The kit's `$.ui.scroll` to a row never lands, so the plugin never writes
   // the cursor itself. After each press that asked for a prompt, write what
   // `move()` writes once its scroll landed: the cursor on that prompt.
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   async function pressAndLand(key: 'prev' | 'next' | 'latest') {
     const asked = calls.scroll.length
     await ui.press({ key })
