@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, PromptOrigin } from 'claude-code'
+import type { Nav } from '../types'
 
 const BAND = {
   plugin: 'session-compass',
@@ -217,29 +218,43 @@ test('each button asks for the right prompt, and none goes past the ends', async
   await ui.unmount()
 })
 
-test('after latest, prev goes to the prompt before the newest at the first press', async ($, on) => {
+test('after latest, prev steps to the prompt before the newest and next comes back to the newest', async ($, on) => {
   const { calls } = engine(on)
-  // The nav as ⏬ leaves it once its scroll landed: the cursor on the newest prompt.
-  let cursorId: string | null = null
-  const writes: unknown[] = []
-  on('state.get', (_, e) => {
-    if (e.key === 'nav') {
-      return {
-        value: { value: { liveIds: ['u1', 'u2', 'u3'], pastPrompts: [], promptIds: ['u1', 'u2', 'u3'], cursorId }, version: 1 },
-      }
-    }
-    return { value: { value: undefined, version: 0 } }
-  })
+  // The nav lives in a versioned store, so what the plugin writes with
+  // `state.set` (compare-and-set on the version) is what it reads next.
+  const nav: Nav = { liveIds: ['u1', 'u2', 'u3'], pastPrompts: [], promptIds: ['u1', 'u2', 'u3'], cursorId: null }
+  const store = new Map<string, { value: unknown; version: number }>([['nav', { value: nav, version: 1 }]])
+  on('state.get', (_, e) => ({ value: store.get(e.key) ?? { value: undefined, version: 0 } }) as never)
   on('state.set', (_, e) => {
-    writes.push(e.value)
-    return { value: { isSet: true, version: 2 } }
+    const held = store.get(e.key) ?? { value: undefined, version: 0 }
+    if (e.ifVersion !== undefined && e.ifVersion !== held.version) {
+      return { value: { isSet: false, version: held.version } }
+    }
+    const written = { value: e.value, version: held.version + 1 }
+    store.set(e.key, written)
+    return { value: { isSet: true, version: written.version } }
   })
+  const cursor = () => (store.get('nav')?.value as Nav).cursorId
+  // The kit's `$.ui.scroll` to a row never lands, so the plugin never writes
+  // the cursor itself. After each press that asked for a prompt, write what
+  // `move()` writes once its scroll landed: the cursor on that prompt.
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  await ui.press({ key: 'latest' })
-  cursorId = 'u3'
-  await ui.press({ key: 'prev' })
-  await ui.press({ key: 'next' }) // on the newest prompt: stays there
+  async function pressAndLand(key: 'prev' | 'next' | 'latest') {
+    const asked = calls.scroll.length
+    await ui.press({ key })
+    const target = calls.scroll[asked]
+    if (target === undefined) return
+    const held = store.get('nav')!
+    store.set('nav', { value: { ...(held.value as Nav), cursorId: target }, version: held.version + 1 })
+  }
+  await pressAndLand('latest')
+  expect(cursor()).toBe('u3')
+  await pressAndLand('prev')
+  // 🔽 is pressed with the cursor on u2, not left on the newest prompt.
+  expect(cursor()).toBe('u2')
+  await pressAndLand('next')
   expect(calls.scroll).toEqual(['u3', 'u2', 'u3'])
+  expect(cursor()).toBe('u3')
   await ui.unmount()
 })
 
