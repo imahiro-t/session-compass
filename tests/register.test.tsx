@@ -643,3 +643,49 @@ test('the summary keeps showing while a new one is made', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /要約中/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('scrolling down after a button and pressing 🔼 goes back to the prompt being read, every time', async ($, on) => {
+  const { clock, calls } = engine(on)
+  let cursorId: string | null = 'u2'
+  on('state.get', (_, e, next) => {
+    if (e.key === 'nav') {
+      const ids = ['u1', 'u2', 'u3', 'u4']
+      return { value: { value: { liveIds: ids, pastPrompts: [], promptIds: ids, cursorId }, version: 1 } }
+    }
+    return next(e)
+  })
+  on('ui.render', { component: 'AssistantMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  async function drawReplyAt(requestId: string, onScreen: { first: number; last: number; of: number } | null) {
+    const row = await $.ui.mount({
+      plugin: 'session-compass',
+      surface: 'terminal',
+      component: 'AssistantMessage',
+      requestId,
+      props: { text: 'reply', isFirstOfReply: true, onScreen },
+    })
+    await row.unmount()
+  }
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // The last button put u2 on top; the person scrolls down: u2's reply moves
+  // up, u3's one-line row comes in and jumps out of view whole at the top.
+  await drawRow($, 'u2', 'two', { first: 0, last: 0, of: 1 })
+  await drawReplyAt('a2', { first: 0, last: 9, of: 30 })
+  await drawReplyAt('a2', { first: 20, last: 29, of: 30 })
+  await drawRow($, 'u2', 'two', null)
+  await drawRow($, 'u3', 'three', { first: 0, last: 0, of: 1 })
+  await drawReplyAt('a3', { first: 0, last: 8, of: 30 })
+  await drawReplyAt('a3', { first: 3, last: 12, of: 30 })
+  await drawRow($, 'u3', 'three', null)
+  await ui.press({ key: 'prev' })
+  expect(calls.scroll).toEqual(['u3'])
+  await ui.unmount()
+})

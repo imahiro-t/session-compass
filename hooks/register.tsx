@@ -24,6 +24,7 @@ import {
   titleLine,
   unknownPrompts,
   userPromptTexts,
+  copyViewport,
   emptyViewport,
   noteMove,
   noteReport,
@@ -395,19 +396,22 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     const nav = withoutBadStops(held.value ?? EMPTY_NAV)
     const viewport = viewOn(surface)
     const view = viewSpan(nav.promptIds, viewport.seen, viewport.sides)
-    const target = navTarget(kind, nav.promptIds, nav.cursorId, view)
+    // Until the person scrolls, the last move is where they are; after, the viewport is.
+    const isViewFirst = viewport.isHandScrolled
+    const target = navTarget(kind, nav.promptIds, nav.cursorId, view, isViewFirst)
     debug(
       $,
-      `${kind} counts from ${navPosition(nav.promptIds, nav.cursorId, view)} ` +
-        `(cursor ${nav.cursorId ?? 'end'}, view ${view === null ? 'none' : `${view.lo}..${view.hi} at ${view.at}`})`,
+      `${kind} counts from ${navPosition(nav.promptIds, nav.cursorId, view, isViewFirst)} ` +
+        `(cursor ${nav.cursorId ?? 'end'}, view ${view === null ? 'none' : `${view.lo}..${view.hi} at ${view.at}`}` +
+        `${isViewFirst ? ', scrolled by hand' : ''}, moving ${viewport.direction ?? 'unknown'})`,
     )
     if (target === null) return
     debug($, `${kind} scrolls to ${target.id}`)
     // What the rows said of the old viewport no longer holds once it moves;
     // the rows the scroll brings on screen report afresh. A scroll that does
     // not land leaves the viewport, and what is known of it, as it was.
-    const before = { seen: new Map(viewport.seen), sides: new Map(viewport.sides) }
-    noteMove(viewport, nav.promptIds, target.index)
+    const before = copyViewport(viewport)
+    noteMove(viewport, nav.promptIds, target.index, Date.now())
     let scrolled: { deny?: string }
     try {
       scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
@@ -415,8 +419,7 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
       scrolled = { deny: String(error) }
     }
     if (scrolled.deny !== undefined) {
-      viewport.seen = before.seen
-      viewport.sides = before.sides
+      viewBySurface.set(surface, before)
       debug($, `could not scroll to the prompt: ${scrolled.deny}`)
       return
     }
@@ -487,8 +490,24 @@ export const register: Register = on => {
     if (isStopId(e.requestId) && isOwnPrompt(origin, { task, from }) && text.trim() !== '') {
       renderBuffer.set(e.requestId, promptKey(text))
       if ('onScreen' in e.props && e.props.onScreen !== undefined) {
-        noteReport(viewOn(e.surface), e.requestId, e.props.onScreen)
+        noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, true, Date.now())
       }
+    }
+    return next(e)
+  })
+
+  // Reply rows tell which way the viewport moves, so a prompt row that jumps
+  // out of view whole is known to be above it or below it.
+  on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
+    if ('onScreen' in e.props && e.props.onScreen !== undefined) {
+      noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, false, Date.now())
+    }
+    return next(e)
+  })
+
+  on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
+    if ('onScreen' in e.props && e.props.onScreen !== undefined) {
+      noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, false, Date.now())
     }
     return next(e)
   })

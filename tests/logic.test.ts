@@ -26,7 +26,9 @@ import {
   summaryLine,
   textWidth,
   userPromptTexts,
+  directionOf,
   emptyViewport,
+  MOVE_SETTLE_MS,
   noteMove,
   noteReport,
   viewSpan,
@@ -410,13 +412,13 @@ describe('a viewport with no prompt row on screen', () => {
 
   test('a row cut at the top that goes off screen went up past the top', () => {
     const view = emptyViewport()
-    noteReport(view, 'b', { first: 0, last: 2, of: 3 })
-    noteReport(view, 'b', { first: 2, last: 2, of: 3 })
-    noteReport(view, 'b', null)
+    noteReport(view, 'b', { first: 0, last: 2, of: 3 }, true, 1000)
+    noteReport(view, 'b', { first: 2, last: 2, of: 3 }, true, 1000)
+    noteReport(view, 'b', null, true, 1000)
     expect(view.sides.get('b')).toBe('above')
     // Scrolled up from the end to get here: c went down past the bottom.
-    noteReport(view, 'c', { first: 0, last: 0, of: 2 })
-    noteReport(view, 'c', null)
+    noteReport(view, 'c', { first: 0, last: 0, of: 2 }, true, 1000)
+    noteReport(view, 'c', null, true, 1000)
     // In b's reply: prev goes back to b, next on to c.
     const span = viewSpan(ids, view.seen, view.sides)
     expect(span).toEqual({ lo: 1, hi: 1.5, at: 1.5 })
@@ -426,24 +428,24 @@ describe('a viewport with no prompt row on screen', () => {
 
   test('a row cut at the bottom that goes off screen went down past the bottom', () => {
     const view = emptyViewport()
-    noteReport(view, 'c', { first: 0, last: 0, of: 3 })
-    noteReport(view, 'c', null)
+    noteReport(view, 'c', { first: 0, last: 0, of: 3 }, true, 1000)
+    noteReport(view, 'c', null, true, 1000)
     expect(view.sides.get('c')).toBe('below')
     expect(viewSpan(ids, view.seen, view.sides)).toEqual({ lo: -0.5, hi: 1.5, at: 1.5 })
   })
 
   test('a row shown whole and then gone keeps the side it had', () => {
     const view = emptyViewport()
-    noteReport(view, 'c', { first: 0, last: 1, of: 2 })
-    noteReport(view, 'c', null)
+    noteReport(view, 'c', { first: 0, last: 1, of: 2 }, true, 1000)
+    noteReport(view, 'c', null, true, 1000)
     expect(view.sides.has('c')).toBe(false)
     expect(viewSpan(ids, view.seen, view.sides)).toBe(null)
   })
 
   test('after a button the prompts before the target are above and those after below', () => {
     const view = emptyViewport()
-    noteReport(view, 'a', { first: 0, last: 0, of: 1 })
-    noteMove(view, ids, 2)
+    noteReport(view, 'a', { first: 0, last: 0, of: 1 }, true, 1000)
+    noteMove(view, ids, 2, 0)
     expect(view.seen.size).toBe(0)
     expect([...view.sides]).toEqual([['a', 'above'], ['b', 'above'], ['d', 'below']])
     // The cursor on c agrees with that.
@@ -455,5 +457,54 @@ describe('a viewport with no prompt row on screen', () => {
   test('sides that disagree tell nothing', () => {
     const sides = new Map([['a', 'below'], ['c', 'above']] as const)
     expect(viewSpan(ids, new Map(), sides)).toBe(null)
+  })
+})
+
+describe('which way the viewport moves', () => {
+  test('from two reports of one row', () => {
+    expect(directionOf({ first: 0, last: 3, of: 9 }, { first: 2, last: 5, of: 9 })).toBe('down')
+    expect(directionOf({ first: 2, last: 5, of: 9 }, { first: 0, last: 3, of: 9 })).toBe('up')
+    expect(directionOf({ first: 4, last: 8, of: 9 }, null)).toBe('down')
+    expect(directionOf({ first: 0, last: 3, of: 9 }, null)).toBe('up')
+    expect(directionOf(undefined, { first: 0, last: 3, of: 9 })).toBe('down')
+    expect(directionOf(null, { first: 5, last: 8, of: 9 })).toBe('up')
+    expect(directionOf({ first: 0, last: 1, of: 2 }, null)).toBe(null)
+  })
+
+  test('a prompt row that jumps out whole goes the way a reply row shows', () => {
+    const view = emptyViewport()
+    // Scrolling down: the prompt row c shown whole, the reply below it moving up the screen.
+    noteReport(view, 'c', { first: 0, last: 0, of: 1 }, true, 1000)
+    noteReport(view, 'r', { first: 0, last: 5, of: 40 }, false, 1000)
+    noteReport(view, 'r', { first: 6, last: 11, of: 40 }, false, 1000)
+    noteReport(view, 'c', null, true, 1000)
+    expect(view.sides.get('c')).toBe('above')
+    // And back up: the reply moves down, c reappears and jumps out below.
+    noteReport(view, 'c', { first: 0, last: 0, of: 1 }, true, 1000)
+    noteReport(view, 'r', { first: 0, last: 5, of: 40 }, false, 1000)
+    noteReport(view, 'c', null, true, 1000)
+    expect(view.sides.get('c')).toBe('below')
+  })
+
+  test('reports right after a button are the move\'s own; later ones are a scroll', () => {
+    const view = emptyViewport()
+    noteMove(view, ['a', 'b'], 1, 1000)
+    noteReport(view, 'b', { first: 0, last: 0, of: 1 }, true, 1000 + MOVE_SETTLE_MS)
+    expect(view.isHandScrolled).toBe(false)
+    noteReport(view, 'b', { first: 0, last: 0, of: 1 }, true, 1001 + MOVE_SETTLE_MS)
+    expect(view.isHandScrolled).toBe(true)
+  })
+
+  test('scrolled by hand, the viewport wins even where the cursor would agree', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e']
+    // In d's reply, e's row not reached: c, d above.
+    const sides = new Map([['a', 'above'], ['b', 'above'], ['c', 'above'], ['d', 'above']] as const)
+    const view = viewSpan(ids, new Map(), sides)
+    expect(view).toEqual({ lo: 3, hi: 4.5, at: 3.5 })
+    // The last button stopped at d; the person scrolled down into d's reply.
+    // The cursor agrees with the viewport, yet 🔼 goes to d itself, where the
+    // person reads, not past it to c.
+    expect(navTarget('prev', ids, 'd', view, false)?.id).toBe('c')
+    expect(navTarget('prev', ids, 'd', view, true)?.id).toBe('d')
   })
 })

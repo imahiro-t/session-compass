@@ -298,24 +298,76 @@ export type ViewSpan = { lo: number; hi: number; at: number }
 /** Which side of the viewport a prompt row is on while it is off screen. */
 export type Side = 'above' | 'below'
 
+/** Which way the viewport last moved over the transcript. */
+export type Direction = 'up' | 'down'
+
 /**
- * What the drawn prompt rows said of one surface's viewport: each row's last
- * report (`seen`, null once off screen) and, for a row off screen, the side
- * it left by (`sides`).
+ * Reports after a button's move that come later than this many ms are not
+ * the move's own: the viewport moved again (the person scrolled, or the
+ * transcript grew under it).
  */
-export type Viewport = { seen: Map<string, Seen>; sides: Map<string, Side> }
+export const MOVE_SETTLE_MS = 500
+
+/**
+ * What the drawn rows said of one surface's viewport: each prompt row's last
+ * report (`seen`, null once off screen) and, for a prompt row off screen,
+ * the side it left by (`sides`); every row's last report (`rows`, replies
+ * too), which way the viewport last moved (`direction`), when a button last
+ * moved it (`movedAt`), and whether it moved since (`isHandScrolled`).
+ */
+export type Viewport = {
+  seen: Map<string, Seen>
+  sides: Map<string, Side>
+  rows: Map<string, Seen>
+  direction: Direction | null
+  movedAt: number
+  isHandScrolled: boolean
+}
 
 export function emptyViewport(): Viewport {
-  return { seen: new Map(), sides: new Map() }
+  return { seen: new Map(), sides: new Map(), rows: new Map(), direction: null, movedAt: 0, isHandScrolled: false }
+}
+
+export function copyViewport(view: Viewport): Viewport {
+  return { ...view, seen: new Map(view.seen), sides: new Map(view.sides), rows: new Map(view.rows) }
 }
 
 /**
- * Takes in one row's report. A row that goes off screen left by the edge it
- * was cut at: its top cut, it went up past the top; its bottom cut, down past
- * the bottom. A row shown whole that is gone the next report jumped out of
- * view, and its side stays as it was.
+ * Which way the viewport moved, from two reports of one row: its rows in
+ * view moving down the row (or the row leaving by its top, or coming in by
+ * its bottom) mean the viewport went down; the other way, up. Null when the
+ * reports do not tell.
  */
-export function noteReport(view: Viewport, id: string, report: Seen): void {
+export function directionOf(before: Seen | undefined, after: Seen): Direction | null {
+  if (before !== undefined && before !== null && after !== null) {
+    if (after.first > before.first || after.last > before.last) return 'down'
+    if (after.first < before.first || after.last < before.last) return 'up'
+    return null
+  }
+  if (before !== undefined && before !== null) {
+    if (before.first > 0) return 'down'
+    if (before.last < before.of - 1) return 'up'
+    return null
+  }
+  if (after !== null) {
+    if (after.first > 0) return 'up'
+    if (after.last < after.of - 1) return 'down'
+  }
+  return null
+}
+
+/**
+ * Takes in one row's report, `isPrompt` for the person's prompt rows. A
+ * prompt row that goes off screen left by the edge it was cut at (its top
+ * cut: above; its bottom cut: below); one shown whole that is gone the next
+ * report jumped out of view, the way the viewport was moving.
+ */
+export function noteReport(view: Viewport, id: string, report: Seen, isPrompt: boolean, now: number): void {
+  const direction = directionOf(view.rows.get(id), report)
+  view.rows.set(id, report)
+  if (direction !== null) view.direction = direction
+  if (now - view.movedAt > MOVE_SETTLE_MS) view.isHandScrolled = true
+  if (!isPrompt) return
   const before = view.seen.get(id)
   view.seen.set(id, report)
   if (report !== null) {
@@ -325,16 +377,22 @@ export function noteReport(view: Viewport, id: string, report: Seen): void {
   if (before === undefined || before === null) return
   if (before.first > 0) view.sides.set(id, 'above')
   else if (before.last < before.of - 1) view.sides.set(id, 'below')
+  else if (view.direction === 'down') view.sides.set(id, 'above')
+  else if (view.direction === 'up') view.sides.set(id, 'below')
 }
 
 /**
- * Takes in a button's move to prompt `index`: the old reports no longer hold,
- * the prompts before it are now above the viewport and those after it below,
- * until the rows report otherwise.
+ * Takes in a button's move to prompt `index` at `now`: the old reports no
+ * longer hold, the prompts before it are now above the viewport and those
+ * after it below, until the rows report otherwise.
  */
-export function noteMove(view: Viewport, promptIds: readonly string[], index: number): void {
+export function noteMove(view: Viewport, promptIds: readonly string[], index: number, now: number): void {
   view.seen.clear()
   view.sides.clear()
+  view.rows.clear()
+  view.direction = null
+  view.movedAt = now
+  view.isHandScrolled = false
   promptIds.forEach((id, i) => {
     if (i < index) view.sides.set(id, 'above')
     else if (i > index) view.sides.set(id, 'below')
@@ -388,17 +446,24 @@ export function viewSpan(
 }
 
 /**
- * The position a button counts from: the cursor, while the viewport is where
- * the cursor says or nothing reports where it is; else where the viewport
- * is, so a person who scrolled by hand steps from what they see.
+ * The position a button counts from. With `isViewFirst` (the person scrolled
+ * since the last move) it is where the viewport is, so they step from what
+ * they see. Otherwise the cursor, while the viewport is where the cursor says
+ * or nothing reports where it is; else where the viewport is.
  *
  * `cursorId` null (or an id no longer listed) is the end of the transcript,
  * below the newest prompt.
  */
-export function navPosition(promptIds: readonly string[], cursorId: string | null, view: ViewSpan | null = null): number {
+export function navPosition(
+  promptIds: readonly string[],
+  cursorId: string | null,
+  view: ViewSpan | null = null,
+  isViewFirst = false,
+): number {
   const found = cursorId === null ? -1 : promptIds.indexOf(cursorId)
   const cursor = found === -1 ? promptIds.length - 0.5 : found
   if (view === null) return cursor
+  if (isViewFirst) return view.at
   return cursor >= view.lo && cursor <= view.hi ? cursor : view.at
 }
 
@@ -419,10 +484,11 @@ export function navTarget(
   promptIds: readonly string[],
   cursorId: string | null,
   view: ViewSpan | null = null,
+  isViewFirst = false,
 ): NavMove | null {
   const n = promptIds.length
   if (n === 0) return null
-  const at = navPosition(promptIds, cursorId, view)
+  const at = navPosition(promptIds, cursorId, view, isViewFirst)
   let index: number
   switch (kind) {
     case 'first':
