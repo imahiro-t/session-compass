@@ -1,0 +1,12 @@
+{
+  "name": "session-compass",
+  "description": "Session Compass: a session summary and conversation navigation above the Claude Code prompt",
+  "owner": { "name": "Takashi Imahiro" },
+  "plugins": [
+    {
+      "name": "session-compass",
+      "source": "./",
+      "description": "A band above the prompt with a summary of the session and buttons to step through the conversation"
+    }
+  ]
+}
