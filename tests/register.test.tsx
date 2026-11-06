@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, PromptOrigin } from 'claude-code'
 import type { Nav } from '../types'
+import { oneLine, textWidth } from '../hooks/logic'
 
 const BAND = {
   plugin: 'session-compass',
@@ -687,5 +688,60 @@ test('scrolling down after a button and pressing 🔼 goes back to the prompt be
   await drawRow($, 'u3', 'three', null)
   await ui.press({ key: 'prev' })
   expect(calls.scroll).toEqual(['u3'])
+  await ui.unmount()
+})
+
+/** The engine's own drawing of the question dialog, beneath the plugin. */
+function questionEngine(on: On) {
+  on('ui.render', { component: 'AskUserQuestion' }, () => ({ type: 'engine', ref: 0 }) as never)
+}
+
+/** The question dialog, drawn over the engine's own node. */
+async function drawQuestion($: Engine) {
+  return $.ui.mount({
+    plugin: 'session-compass',
+    surface: 'terminal',
+    component: 'AskUserQuestion',
+    requestId: 'toolu_1',
+    props: { tool: 'AskUserQuestion', questions: [{ question: 'どちらにしますか？' }] },
+  })
+}
+
+test('the summary shows above the question dialog, cut to one row', async ($, on) => {
+  const { clock } = engine(on, { isAnswered: true, text: 'ログイン画面のエラーを直して、テストを追加し、リリース手順を整える' })
+  questionEngine(on)
+  await start($)
+  await say($, 'u1', 'ログイン画面でエラーになるバグを直してほしい')
+  await clock.settle()
+  const ui = await drawQuestion($)
+  const line = await ui.find({ type: 'Text', text: /^ログイン画面のエラー/ })
+  expect(line).toBeDefined()
+  expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
+  // One row of the dialog's 40 columns: 39 cells at most.
+  const cutText = oneLine('ログイン画面のエラーを直して、テストを追加し、リリース手順を整える', 39)
+  expect(textWidth(cutText)).toBeLessThanOrEqual(39)
+  expect(cutText.endsWith('…')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: cutText })).toBeDefined()
+  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a ticket shows above the question dialog; with nothing to show the dialog is the engine\'s alone', async ($, on) => {
+  const { clock } = engine(on)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify({ id: 'SCMP-00001', title: '帯' }), stderr: '' } }) as never)
+  questionEngine(on)
+  await start($)
+  await clock.settle()
+  let ui = await drawQuestion($)
+  expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /まだプロンプト/ })).toBeUndefined()
+  await ui.unmount()
+
+  const command = { name: 'graph-ops:process-ticket', args: 'SCMP-00001' }
+  await $.prompt.submit({ text: '/graph-ops:process-ticket SCMP-00001', origin: COMPOSER, wait: false, command })
+  await clock.settle()
+  ui = await drawQuestion($)
+  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: / 帯/ })).toBeDefined()
   await ui.unmount()
 })

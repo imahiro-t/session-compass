@@ -78,6 +78,12 @@ const BUTTONS_MARGIN = 1
 /** Cells the whole button row takes, the margin before it included. */
 const BUTTONS_WIDTH = BUTTONS.length * BUTTON_CELLS + (BUTTONS.length - 1) * BUTTON_GAP + BUTTONS_MARGIN
 
+/**
+ * Cells the summary takes above the question dialog: under the 40 columns
+ * the dialog counts as one row.
+ */
+const QUESTION_COLUMNS = 39
+
 /** `$.session.messages()` returns at most this many entries, the newest. */
 const MESSAGES_LIMIT = 4096
 
@@ -510,6 +516,43 @@ export const register: Register = on => {
       noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, false, Date.now())
     }
     return next(e)
+  })
+
+  // The question dialog takes the prompt's place, the band with it: the
+  // ticket or summary goes above the dialog instead, on one row (the dialog
+  // counts each 40 columns a row, its tree held to 12 on the terminal), with
+  // no buttons.
+  on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
+    const dialog = await next(e)
+    const firstPrompt = await read($, firstPromptAtom)
+    const summary = await read($, summaryAtom)
+    const ticket = await read($, ticketAtom)
+    const { Box, Text } = $.ui.resolve(e)
+    let line: JSX.Element
+    if (ticket) {
+      const shown = ticketBand(ticket, QUESTION_COLUMNS)
+      line = (
+        <Text wrap="truncate-end" weight="bold">
+          <Text color="suggestion">{shown.id}</Text>
+          {shown.title === '' ? '' : <Text color="claude">{` ${shown.title}`}</Text>}
+        </Text>
+      )
+    } else {
+      const band = bandText(firstPrompt, summary, QUESTION_COLUMNS)
+      if (band.kind === 'empty') return dialog
+      // No dim note here: the row is the summary's alone.
+      line = (
+        <Text wrap="truncate-end" color="claude" weight="bold">
+          {band.kind === 'pending' ? bandText(firstPrompt, { status: 'idle' }, QUESTION_COLUMNS).text : band.text}
+        </Text>
+      )
+    }
+    return (
+      <Box flexDirection="column">
+        {line}
+        {dialog}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
