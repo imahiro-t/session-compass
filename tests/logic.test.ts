@@ -256,7 +256,7 @@ describe('the viewport the person scrolled to', () => {
 
   test('a prompt whose row starts on screen leaves the turn before it at the top', () => {
     const view = viewSpan(ids, seen([['b', { first: 0, last: 1, of: 2 }], ['c', { first: 0, last: 0, of: 3 }]]))
-    expect(view).toEqual({ lo: 0.5, hi: 2.5, at: 0.5 })
+    expect(view).toEqual({ lo: 0, hi: 2.5, at: 0.5 })
   })
 
   test('scrolled by hand away from the cursor, the buttons count from the viewport', () => {
@@ -285,6 +285,13 @@ describe('the viewport the person scrolled to', () => {
     const end = viewSpan(ids, seen([['d', { first: 0, last: 1, of: 2 }]]))
     expect(navTarget('prev', ids, null, end)?.id).toBe('d')
     expect(navTarget('next', ids, null, end)).toBe(null)
+  })
+
+  test('right after a button, the prompt it moved to sits under the header and is not reported', () => {
+    // 🔽 put b on the top row; only c, lower down, says it is on screen.
+    const view = viewSpan(ids, seen([['b', null], ['c', { first: 0, last: 1, of: 2 }]]))
+    expect(navTarget('prev', ids, 'b', view)?.id).toBe('a')
+    expect(navTarget('next', ids, 'b', view)?.id).toBe('c')
   })
 
   test('above the first prompt, prev and next both go to it', () => {

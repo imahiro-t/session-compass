@@ -7,6 +7,7 @@ import {
   bandText,
   isOwnPrompt,
   isStopId,
+  navPosition,
   navTarget,
   promptKey,
   summaryInput,
@@ -246,7 +247,13 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     const held = await $.state.get(NAV)
     const nav = withoutBadStops(held.value ?? EMPTY_NAV)
     const seen = seenOn(surface)
-    const target = navTarget(kind, nav.promptIds, nav.cursorId, viewSpan(nav.promptIds, seen))
+    const view = viewSpan(nav.promptIds, seen)
+    const target = navTarget(kind, nav.promptIds, nav.cursorId, view)
+    debug(
+      $,
+      `${kind} counts from ${navPosition(nav.promptIds, nav.cursorId, view)} ` +
+        `(cursor ${nav.cursorId ?? 'end'}, view ${view === null ? 'none' : `${view.lo}..${view.hi} at ${view.at}`})`,
+    )
     if (target === null) return
     debug($, `${kind} scrolls to ${target.id}`)
     // What the rows said of the old viewport no longer holds once it moves;

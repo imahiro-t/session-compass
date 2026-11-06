@@ -311,9 +311,11 @@ export function viewSpan(promptIds: readonly string[], seen: ReadonlyMap<string,
   const top = seen.get(promptIds[v]!)!
   // Its row's top scrolled away: the viewport is in prompt v's turn.
   if (top.first > 0) return { lo: v, hi: w + 0.5, at: v + 0.5 }
-  // Its row starts on screen: either at the top, or below the end of the
-  // turn before, which then fills the top.
-  return { lo: v - 0.5, hi: w + 0.5, at: v - 0.5 }
+  // Its row starts on screen: below the end of the turn before, which then
+  // fills the top. That turn's own prompt may be on the top row too, yet not
+  // reported: a button puts it there, under the terminal's header of the
+  // prompt being read. So a cursor on it still agrees with the viewport.
+  return { lo: v - 1, hi: w + 0.5, at: v - 0.5 }
 }
 
 /**
