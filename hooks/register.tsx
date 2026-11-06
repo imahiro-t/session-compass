@@ -6,16 +6,19 @@ import {
   EMPTY_NAV,
   bandText,
   isOwnPrompt,
+  isStopId,
   navTarget,
   promptKey,
   summaryInput,
   summaryLine,
   unknownPrompts,
   userPromptTexts,
+  viewSpan,
   withLivePrompt,
   withPastPrompts,
+  withoutBadStops,
 } from './logic'
-import type { NavKind } from './logic'
+import type { NavKind, Seen } from './logic'
 
 const FIRST_PROMPT = { plugin: 'session-compass', key: 'firstPrompt' } as const
 const SUMMARY = { plugin: 'session-compass', key: 'summary' } as const
@@ -59,6 +62,20 @@ const envToken = crypto.randomUUID()
 // drawing merges them (mergeBuffer). A reload empties it; the rows fire
 // `UserMessage` again when redrawn.
 const renderBuffer = new Map<string, string>()
+
+// What each drawn prompt row last said of the viewport (`onScreen`), per
+// surface: where the person has scrolled to, read when a button is pressed.
+// Kept here, not in state, for the same reason as renderBuffer.
+const seenBySurface = new Map<string, Map<string, Seen>>()
+
+function seenOn(surface: string): Map<string, Seen> {
+  let seen = seenBySurface.get(surface)
+  if (seen === undefined) {
+    seen = new Map()
+    seenBySurface.set(surface, seen)
+  }
+  return seen
+}
 
 function debug($: Dollar, text: string): void {
   $.ui.log(`session-compass: ${text}`, { to: 'debug' })
@@ -223,22 +240,27 @@ async function onStart($: Dollar): Promise<void> {
   await mergeBuffer($)
 }
 
-async function move($: Dollar, kind: NavKind): Promise<void> {
+async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
   try {
     if (renderBuffer.size > 0) await mergeBuffer($)
     const held = await $.state.get(NAV)
-    const nav = held.value ?? EMPTY_NAV
-    const target = navTarget(kind, nav.promptIds, nav.cursorId)
+    const nav = withoutBadStops(held.value ?? EMPTY_NAV)
+    const seen = seenOn(surface)
+    const target = navTarget(kind, nav.promptIds, nav.cursorId, viewSpan(nav.promptIds, seen))
     if (target === null) return
     debug($, `${kind} scrolls to ${target.id}`)
+    // What the rows said of the old viewport no longer holds once it moves;
+    // the rows the scroll brings on screen report afresh.
+    seen.clear()
     const scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
     if (scrolled.deny !== undefined) {
       debug($, `could not scroll to the prompt: ${scrolled.deny}`)
       return
     }
-    await writeNav($, 'cursor', current =>
-      current.cursorId === target.id ? null : { ...current, cursorId: target.id },
-    )
+    await writeNav($, 'cursor', stored => {
+      const current = withoutBadStops(stored)
+      return current === stored && current.cursorId === target.id ? null : { ...current, cursorId: target.id }
+    })
   } catch (error) {
     debug($, `navigation failed: ${String(error)}`)
   }
@@ -292,8 +314,11 @@ export const register: Register = on => {
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
     // Drawing may not write state: remember the row, merge it later.
     const { origin, task, from, text } = e.props
-    if (isOwnPrompt(origin, { task, from }) && text.trim() !== '') {
+    if (isStopId(e.requestId) && isOwnPrompt(origin, { task, from }) && text.trim() !== '') {
       renderBuffer.set(e.requestId, promptKey(text))
+      if ('onScreen' in e.props && e.props.onScreen !== undefined) {
+        seenOn(e.surface).set(e.requestId, e.props.onScreen)
+      }
     }
     return next(e)
   })
@@ -324,7 +349,7 @@ export const register: Register = on => {
               key={b.kind}
               label={b.label}
               dimColor={!hasPrompts}
-              onPress={() => move($, b.kind)}
+              onPress={() => move($, b.kind, e.surface)}
             />
           ))}
         </Box>

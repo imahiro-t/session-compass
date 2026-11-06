@@ -252,32 +252,117 @@ export type NavMove = {
 }
 
 /**
+ * The id the terminal draws a just-sent prompt's row under until the message
+ * has its own id. Nothing can be scrolled to it once the real row is drawn,
+ * so it is never a stop.
+ */
+export const PLACEHOLDER_ID = 'placeholder'
+
+/** Whether a drawn row's id names a real message the buttons can stop at. */
+export function isStopId(id: string): boolean {
+  return id !== '' && id !== PLACEHOLDER_ID
+}
+
+/**
+ * The nav without stops that are not real messages (a `placeholder` an
+ * earlier version kept). The same nav object when there is none.
+ */
+export function withoutBadStops(nav: Nav): Nav {
+  if (nav.promptIds.every(isStopId)) return nav
+  const liveIds = nav.liveIds.filter(isStopId)
+  const pastPrompts = nav.pastPrompts.filter(p => isStopId(p.id))
+  const cursorId = nav.cursorId !== null && isStopId(nav.cursorId) ? nav.cursorId : null
+  return { liveIds, pastPrompts, promptIds: promptIdsOf(pastPrompts, liveIds), cursorId }
+}
+
+/**
+ * Which rows of a message the viewport shows (`UserMessage`'s `onScreen`), or
+ * null while it is drawn outside the viewport.
+ */
+export type Seen = { readonly first: number; readonly last: number; readonly of: number } | null
+
+/**
+ * Where the viewport stands among the prompts, in half steps of the prompt
+ * list: `k` is prompt k's own row at the top, `k + 0.5` somewhere in prompt
+ * k's turn past its row, `-0.5` above the first prompt.
+ *
+ * `at` is the best guess, from the viewport's top as the terminal's own
+ * header reads it; `lo`..`hi` is every position the viewport is consistent
+ * with, since a prompt whose row starts on screen may sit at the very top
+ * (where a button put it) or lower down.
+ */
+export type ViewSpan = { lo: number; hi: number; at: number }
+
+/**
+ * The span the viewport shows, from what the drawn prompt rows last reported;
+ * null when no prompt row is on screen (the viewport is inside one long
+ * turn, or nothing has reported).
+ */
+export function viewSpan(promptIds: readonly string[], seen: ReadonlyMap<string, Seen>): ViewSpan | null {
+  let v = -1
+  let w = -1
+  for (let i = 0; i < promptIds.length; i++) {
+    const s = seen.get(promptIds[i]!)
+    if (s === undefined || s === null) continue
+    if (v === -1) v = i
+    w = i
+  }
+  if (v === -1) return null
+  const top = seen.get(promptIds[v]!)!
+  // Its row's top scrolled away: the viewport is in prompt v's turn.
+  if (top.first > 0) return { lo: v, hi: w + 0.5, at: v + 0.5 }
+  // Its row starts on screen: either at the top, or below the end of the
+  // turn before, which then fills the top.
+  return { lo: v - 0.5, hi: w + 0.5, at: v - 0.5 }
+}
+
+/**
+ * The position a button counts from: the cursor, while the viewport is where
+ * the cursor says or nothing reports where it is; else where the viewport
+ * is, so a person who scrolled by hand steps from what they see.
+ *
+ * `cursorId` null (or an id no longer listed) is the end of the transcript,
+ * below the newest prompt.
+ */
+export function navPosition(promptIds: readonly string[], cursorId: string | null, view: ViewSpan | null = null): number {
+  const found = cursorId === null ? -1 : promptIds.indexOf(cursorId)
+  const cursor = found === -1 ? promptIds.length - 0.5 : found
+  if (view === null) return cursor
+  return cursor >= view.lo && cursor <= view.hi ? cursor : view.at
+}
+
+/**
  * Where a button goes, or null when there is nowhere to go (no prompts yet,
  * or "next" while at the end of the transcript). Always an index inside the
  * list.
  *
- * `cursorId` null (or an id no longer listed) is the end of the transcript,
- * below the newest prompt: where a session starts and where a new prompt
- * leaves it. "prev" from there goes to the newest prompt. "latest" lands on
- * the newest prompt itself, so the cursor names it and "prev" next goes one
- * further back.
+ * The position comes from `navPosition`: at the end of the transcript
+ * (where a session starts and where a new prompt leaves it) "prev" goes to
+ * the newest prompt; inside a prompt's turn "prev" goes to that prompt's own
+ * row and "next" to the one after; on a prompt's row they step one each way.
+ * "latest" lands on the newest prompt itself, so the cursor names it and
+ * "prev" next goes one further back.
  */
-export function navTarget(kind: NavKind, promptIds: readonly string[], cursorId: string | null): NavMove | null {
+export function navTarget(
+  kind: NavKind,
+  promptIds: readonly string[],
+  cursorId: string | null,
+  view: ViewSpan | null = null,
+): NavMove | null {
   const n = promptIds.length
   if (n === 0) return null
-  const found = cursorId === null ? -1 : promptIds.indexOf(cursorId)
-  const cursor = found === -1 ? null : found
+  const at = navPosition(promptIds, cursorId, view)
   let index: number
   switch (kind) {
     case 'first':
       index = 0
       break
     case 'prev':
-      index = cursor === null ? n - 1 : Math.max(0, cursor - 1)
+      index = Math.max(0, Math.ceil(at) - 1)
       break
     case 'next':
-      if (cursor === null) return null
-      index = Math.min(n - 1, cursor + 1)
+      if (at > n - 1) return null
+      index = Math.min(n - 1, Math.floor(at) + 1)
       break
     case 'latest':
       index = n - 1

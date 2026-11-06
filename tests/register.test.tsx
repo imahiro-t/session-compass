@@ -454,3 +454,90 @@ test('the band yields to a survey', async ($, on) => {
   expect(await ui.find({ key: 'first' })).toBeUndefined()
   await ui.unmount()
 })
+
+/** Draws one of the person's prompt rows, as the transcript would. */
+async function drawRow(
+  $: Engine,
+  requestId: string,
+  text: string,
+  onScreen?: { first: number; last: number; of: number } | null,
+) {
+  const row = await $.ui.mount({
+    plugin: 'session-compass',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId,
+    props: { text, origin: COMPOSER, isExpanded: false, ...(onScreen === undefined ? {} : { onScreen }) },
+  })
+  await row.unmount()
+}
+
+test('the row a just-sent prompt is drawn under first is no stop for ⏫', async ($, on) => {
+  const { clock, calls } = engine(on)
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  await start($)
+  // The terminal draws each prompt under `placeholder` until its message has an id.
+  await drawRow($, 'placeholder', 'one')
+  await say($, 'u1', 'one')
+  await drawRow($, 'u1', 'one')
+  await drawRow($, 'placeholder', 'two')
+  await say($, 'u2', 'two')
+  await drawRow($, 'u2', 'two')
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'first' })
+  expect(calls.scroll).toEqual(['u1'])
+  await ui.unmount()
+})
+
+test('a placeholder an earlier version stored is skipped', async ($, on) => {
+  const { calls } = engine(on)
+  on('state.get', (_, e) => {
+    if (e.key === 'nav') {
+      const nav: Nav = {
+        liveIds: ['u1', 'u2'],
+        pastPrompts: [{ id: 'placeholder', key: '3:00000000' }],
+        promptIds: ['placeholder', 'u1', 'u2'],
+        cursorId: 'u1',
+      }
+      return { value: { value: nav, version: 1 } }
+    }
+    return { value: { value: undefined, version: 0 } }
+  })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'first' })
+  await ui.press({ key: 'prev' })
+  expect(calls.scroll).toEqual(['u1', 'u1'])
+  await ui.unmount()
+})
+
+test('after scrolling by hand, the buttons step from the prompt on screen', async ($, on) => {
+  const { clock, calls } = engine(on)
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  await start($)
+  for (const [id, text] of [['u1', 'one'], ['u2', 'two'], ['u3', 'three'], ['u4', 'four']] as const) {
+    await say($, id, text)
+  }
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // Scrolled up by hand into u2's turn: u2's row top is above the viewport.
+  await drawRow($, 'u2', 'two', { first: 2, last: 3, of: 4 })
+  await drawRow($, 'u3', 'three', null)
+  await ui.press({ key: 'prev' })
+  // Scrolled by hand again, to where u3's row starts below u2's turn.
+  await drawRow($, 'u2', 'two', { first: 3, last: 3, of: 4 })
+  await drawRow($, 'u3', 'three', { first: 0, last: 1, of: 2 })
+  await ui.press({ key: 'next' })
+  // With no prompt row on screen, the cursor (still the end here) counts.
+  await ui.press({ key: 'prev' })
+  expect(calls.scroll).toEqual(['u2', 'u3', 'u4'])
+  await ui.unmount()
+})

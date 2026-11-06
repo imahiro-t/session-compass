@@ -6,6 +6,8 @@ import {
   PENDING_NOTE,
   bandText,
   isOwnPrompt,
+  isStopId,
+  navPosition,
   navTarget,
   oneLine,
   orderPast,
@@ -14,9 +16,12 @@ import {
   summaryLine,
   textWidth,
   userPromptTexts,
+  viewSpan,
   withLivePrompt,
   withPastPrompts,
+  withoutBadStops,
 } from '../hooks/logic'
+import type { Seen } from '../hooks/logic'
 
 describe('isOwnPrompt', () => {
   test('the person at the terminal or through Remote Control is the person', () => {
@@ -206,6 +211,86 @@ describe('navTarget', () => {
   test('a cursor no longer in the list counts as the end of the transcript', () => {
     expect(navTarget('prev', ids, 'gone')).toEqual({ index: 2, id: 'c' })
     expect(navTarget('next', ids, 'gone')).toBe(null)
+  })
+})
+
+describe('stops that are not real messages', () => {
+  test('the row a just-sent prompt is drawn under first is no stop', () => {
+    expect(isStopId('placeholder')).toBe(false)
+    expect(isStopId('')).toBe(false)
+    expect(isStopId('402fa281-5788-4e9b-b6e8-b3fe1bf9d7e3')).toBe(true)
+  })
+
+  test('a nav an earlier version stored with a placeholder loses it', () => {
+    const nav = {
+      liveIds: ['u1', 'u2'],
+      pastPrompts: [{ id: 'placeholder', key: '3:00000000' }],
+      promptIds: ['placeholder', 'u1', 'u2'],
+      cursorId: 'placeholder',
+    }
+    const clean = withoutBadStops(nav)
+    expect(clean.promptIds).toEqual(['u1', 'u2'])
+    expect(clean.pastPrompts).toEqual([])
+    expect(clean.cursorId).toBe(null)
+    expect(navTarget('first', clean.promptIds, clean.cursorId)?.id).toBe('u1')
+  })
+
+  test('a clean nav is handed back as it is', () => {
+    const nav = { liveIds: ['u1'], pastPrompts: [], promptIds: ['u1'], cursorId: null }
+    expect(withoutBadStops(nav)).toBe(nav)
+  })
+})
+
+describe('the viewport the person scrolled to', () => {
+  const ids = ['a', 'b', 'c', 'd']
+  const seen = (entries: [string, Seen][]) => new Map<string, Seen>(entries)
+
+  test('no prompt row on screen tells nothing', () => {
+    expect(viewSpan(ids, seen([]))).toBe(null)
+    expect(viewSpan(ids, seen([['a', null], ['b', null]]))).toBe(null)
+  })
+
+  test('a prompt whose row top scrolled away puts the viewport in its turn', () => {
+    expect(viewSpan(ids, seen([['b', { first: 2, last: 4, of: 5 }]]))).toEqual({ lo: 1, hi: 1.5, at: 1.5 })
+  })
+
+  test('a prompt whose row starts on screen leaves the turn before it at the top', () => {
+    const view = viewSpan(ids, seen([['b', { first: 0, last: 1, of: 2 }], ['c', { first: 0, last: 0, of: 3 }]]))
+    expect(view).toEqual({ lo: 0.5, hi: 2.5, at: 0.5 })
+  })
+
+  test('scrolled by hand away from the cursor, the buttons count from the viewport', () => {
+    // At the end of the transcript (cursor null), scrolled up into b's turn.
+    const view = viewSpan(ids, seen([['b', { first: 3, last: 9, of: 10 }]]))
+    expect(navPosition(ids, null, view)).toBe(1.5)
+    expect(navTarget('prev', ids, null, view)?.id).toBe('b')
+    expect(navTarget('next', ids, null, view)?.id).toBe('c')
+    // From the cursor on d instead, the same viewport wins as well.
+    expect(navTarget('prev', ids, 'd', view)?.id).toBe('b')
+  })
+
+  test('scrolled into the turn before the first visible prompt, prev and next straddle it', () => {
+    const view = viewSpan(ids, seen([['c', { first: 0, last: 2, of: 3 }]]))
+    expect(navTarget('prev', ids, null, view)?.id).toBe('b')
+    expect(navTarget('next', ids, null, view)?.id).toBe('c')
+  })
+
+  test('a viewport where the cursor says keeps the cursor', () => {
+    // A button just put b at the top: b's row starts on screen.
+    const view = viewSpan(ids, seen([['b', { first: 0, last: 1, of: 2 }]]))
+    expect(navPosition(ids, 'b', view)).toBe(1)
+    expect(navTarget('prev', ids, 'b', view)?.id).toBe('a')
+    expect(navTarget('next', ids, 'b', view)?.id).toBe('c')
+    // At the end of the transcript with the newest prompt on screen.
+    const end = viewSpan(ids, seen([['d', { first: 0, last: 1, of: 2 }]]))
+    expect(navTarget('prev', ids, null, end)?.id).toBe('d')
+    expect(navTarget('next', ids, null, end)).toBe(null)
+  })
+
+  test('above the first prompt, prev and next both go to it', () => {
+    const view = viewSpan(ids, seen([['a', { first: 0, last: 1, of: 2 }]]))
+    expect(navTarget('prev', ids, 'c', view)?.id).toBe('a')
+    expect(navTarget('next', ids, 'c', view)?.id).toBe('a')
   })
 })
 
