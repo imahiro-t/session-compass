@@ -249,9 +249,10 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     const seen = seenOn(surface)
     const view = viewSpan(nav.promptIds, seen)
     const target = navTarget(kind, nav.promptIds, nav.cursorId, view)
+    const from = navPosition(nav.promptIds, nav.cursorId, view)
     debug(
       $,
-      `${kind} counts from ${navPosition(nav.promptIds, nav.cursorId, view)} ` +
+      `${kind} counts from ${from} ` +
         `(cursor ${nav.cursorId ?? 'end'}, view ${view === null ? 'none' : `${view.lo}..${view.hi} at ${view.at}`})`,
     )
     if (target === null) return
@@ -259,6 +260,18 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     // What the rows said of the old viewport no longer holds once it moves;
     // the rows the scroll brings on screen report afresh.
     seen.clear()
+    // The terminal's header of the prompt being read names the right prompt
+    // after a move up, not always after a move down. So a move down first
+    // passes the target, to the prompt after it, and comes back up to it.
+    const past = target.index > from ? nav.promptIds[target.index + 1] : undefined
+    if (past !== undefined) {
+      try {
+        const passed = await $.ui.scroll({ to: { requestId: past }, block: 'start' })
+        debug($, `passes ${past} on the way${passed.deny === undefined ? '' : `: ${passed.deny}`}`)
+      } catch (error) {
+        debug($, `could not pass ${past}: ${String(error)}`)
+      }
+    }
     const scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
     if (scrolled.deny !== undefined) {
       debug($, `could not scroll to the prompt: ${scrolled.deny}`)

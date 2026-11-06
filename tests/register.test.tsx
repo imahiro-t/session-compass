@@ -541,3 +541,27 @@ test('after scrolling by hand, the buttons step from the prompt on screen', asyn
   expect(calls.scroll).toEqual(['u2', 'u3', 'u4'])
   await ui.unmount()
 })
+
+test('a move down passes the target and comes back up to it', async ($, on) => {
+  const { calls } = engine(on)
+  let cursorId: string | null = 'u1'
+  on('state.get', (_, e, next) => {
+    if (e.key === 'nav') {
+      return { value: { value: { liveIds: ['u1', 'u2', 'u3'], pastPrompts: [], promptIds: ['u1', 'u2', 'u3'], cursorId }, version: 1 } }
+    }
+    return next(e)
+  })
+  const passed = () => calls.logs.filter(l => /pass(es)? u\d/.test(l)).map(l => /pass(?:es)? (u\d)/.exec(l)![1])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'next' }) // u1 -> u2, passing u3
+  expect(passed()).toEqual(['u3'])
+  cursorId = 'u2'
+  await ui.press({ key: 'next' }) // u2 -> u3: nothing after u3 to pass
+  await ui.press({ key: 'latest' })
+  cursorId = 'u3'
+  await ui.press({ key: 'prev' }) // up: no pass
+  await ui.press({ key: 'first' })
+  expect(passed()).toEqual(['u3'])
+  expect(calls.scroll).toEqual(['u2', 'u3', 'u3', 'u2', 'u1'])
+  await ui.unmount()
+})
