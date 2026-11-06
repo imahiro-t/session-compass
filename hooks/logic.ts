@@ -1,7 +1,7 @@
 // Pure helpers of the session-compass band: no `$`, no state, easy to test.
 // Not a hooks module of its own (hooks.json names only register.tsx).
 
-import type { Nav, PastPrompt, Summary } from '../types'
+import type { Nav, PastPrompt, Summary, Ticket } from '../types'
 
 export const EMPTY_NAV: Nav = {
   liveIds: [],
@@ -117,8 +117,10 @@ export function bandText(
   summary: Summary | null | undefined,
   maxWidth: number,
 ): BandText {
-  if (summary?.status === 'done' && summary.text.trim() !== '') {
-    return { kind: 'summary', text: oneLine(summary.text, maxWidth) }
+  // The last summary made stands while a newer one runs or after one failed.
+  const made = summary !== null && summary !== undefined && 'text' in summary ? summary.text : undefined
+  if (typeof made === 'string' && made.trim() !== '') {
+    return { kind: 'summary', text: oneLine(made, maxWidth) }
   }
   if (typeof firstPrompt === 'string' && firstPrompt.trim() !== '') {
     if (summary?.status === 'pending') {
@@ -391,4 +393,142 @@ export const SUMMARY_INPUT_LIMIT = 4000
 export function summaryInput(prompt: string): string {
   const points = Array.from(prompt)
   return points.length > SUMMARY_INPUT_LIMIT ? `${points.slice(0, SUMMARY_INPUT_LIMIT).join('')}…` : prompt
+}
+
+/** A kept prompt is cut to this many code points. */
+export const PROMPT_KEEP_LIMIT = 600
+/** At most this many prompts are kept: the first and the newest. */
+export const PROMPTS_KEPT = 30
+/** The summary is asked for the first prompt and this many newest ones. */
+export const SUMMARY_RECENT = 8
+
+/** Text cut to `limit` code points, an ellipsis after when it was longer. */
+function cut(text: string, limit: number): string {
+  const points = Array.from(text)
+  return points.length <= limit ? text : `${points.slice(0, limit).join('')}…`
+}
+
+/**
+ * The line a prompt is kept as: a slash command as `/name args`, anything
+ * else as typed; on one line, cut to PROMPT_KEEP_LIMIT.
+ */
+export function promptLine(text: string, command?: { readonly name: string; readonly args: string }): string {
+  const typed = command === undefined ? text : `/${command.name} ${command.args}`
+  return cut(typed.replace(/\s+/g, ' ').trim(), PROMPT_KEEP_LIMIT)
+}
+
+/**
+ * The kept prompts with one more: the first stays, then the newest. A line
+ * the same as the last kept one is the same prompt seen twice (a resumed
+ * transcript read while it was submitted) and is not kept again.
+ */
+export function withPrompt(prompts: readonly string[], line: string): string[] {
+  if (prompts[prompts.length - 1] === line) return [...prompts]
+  const all = [...prompts, line]
+  if (all.length <= PROMPTS_KEPT) return all
+  return [all[0]!, ...all.slice(all.length - (PROMPTS_KEPT - 1))]
+}
+
+/** How many kept prompts the summary was made from. */
+export function summaryBasis(summary: Summary | null | undefined): number {
+  if (summary === null || summary === undefined || summary.status === 'idle') return 0
+  return summary.basis ?? 1
+}
+
+/** The last summary made, if any. */
+export function lastSummaryText(summary: Summary | null | undefined): string | undefined {
+  return summary !== null && summary !== undefined && 'text' in summary ? summary.text : undefined
+}
+
+/**
+ * What the summary is asked: the session's first prompt and the newest few,
+ * numbered in the order said.
+ */
+export function summaryPrompts(prompts: readonly string[]): string {
+  const recent = prompts.length <= SUMMARY_RECENT + 1 ? prompts : [prompts[0]!, ...prompts.slice(-SUMMARY_RECENT)]
+  const skipped = prompts.length - recent.length
+  return recent
+    .map((p, i) => {
+      const n = i === 0 ? 1 : i + 1 + skipped
+      return `${n}. ${p}`
+    })
+    .join('\n')
+}
+
+/** Letter-and-digit runs that look like ids yet name no ticket. */
+const NOT_TICKETS: ReadonlySet<string> = new Set([
+  'UTF', 'ISO', 'RFC', 'SHA', 'MD', 'CVE', 'CWE', 'GPT', 'HTTP', 'TLS', 'SSL', 'ES', 'IE', 'PEP', 'JSR', 'ECMA', 'WCAG',
+])
+
+/**
+ * The ticket ids a prompt names, in order, each once: a project key of two
+ * to ten capitals and digits starting with a capital, a hyphen, digits
+ * (`SCMP-00001`, `PROJ-123`). Standards and versions (`UTF-8`, `RFC-2119`)
+ * are not tickets.
+ */
+export function ticketCandidates(text: string): string[] {
+  const out: string[] = []
+  for (const m of text.matchAll(/(?<![A-Za-z0-9-])([A-Z][A-Z0-9]{1,9})-(\d{1,7})(?![A-Za-z0-9-])/g)) {
+    if (NOT_TICKETS.has(m[1]!)) continue
+    const id = `${m[1]}-${m[2]}`
+    if (!out.includes(id)) out.push(id)
+  }
+  return out
+}
+
+/** The title `graph-engine get-ticket <id>` printed for that ticket, or null. */
+export function graphTicketTitle(stdout: string, id: string): string | null {
+  try {
+    const ticket = JSON.parse(stdout) as unknown
+    if (typeof ticket !== 'object' || ticket === null) return null
+    const { id: got, title } = ticket as { id?: unknown; title?: unknown }
+    if (got !== id || typeof title !== 'string') return null
+    const line = title.replace(/\s+/g, ' ').trim()
+    return line === '' ? null : line
+  } catch {
+    return null
+  }
+}
+
+/** A yes/no reply read as a yes. */
+export function isYes(reply: string): boolean {
+  return /^\s*(yes|はい)\b/i.test(reply)
+}
+
+/** A title reply as one line, or null for `NONE` or nothing. */
+export function titleLine(reply: string): string | null {
+  const line = reply.replace(/\s+/g, ' ').trim().replace(/^["「『]|["」』]$/g, '')
+  if (line === '' || /^none$/i.test(line)) return null
+  return line
+}
+
+/**
+ * The parts of the transcript that mention the ticket id, each with some
+ * text around it, joined and cut to `limit` code points: what the title is
+ * looked for in. Empty when the id is not mentioned.
+ */
+export function ticketMentions(texts: readonly string[], id: string, limit = 6000, around = 300): string {
+  const parts: string[] = []
+  let used = 0
+  for (const text of texts) {
+    let from = 0
+    for (;;) {
+      const at = text.indexOf(id, from)
+      if (at === -1) break
+      const part = text.slice(Math.max(0, at - around), at + id.length + around)
+      parts.push(part)
+      used += part.length
+      from = at + id.length + around
+      if (used >= limit) return cut(parts.join('\n---\n'), limit)
+    }
+  }
+  return cut(parts.join('\n---\n'), limit)
+}
+
+/** What the band shows for a ticket: its id, and its title when known. */
+export function ticketBand(ticket: Ticket, maxWidth: number): { id: string; title: string } {
+  const id = oneLine(ticket.id, maxWidth)
+  const room = maxWidth - textWidth(id) - 1
+  const title = ticket.title === null || room <= 1 ? '' : oneLine(ticket.title, room)
+  return { id, title }
 }

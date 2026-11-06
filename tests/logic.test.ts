@@ -5,13 +5,23 @@ import {
   EMPTY_TEXT,
   PENDING_NOTE,
   bandText,
+  graphTicketTitle,
   isOwnPrompt,
   isStopId,
+  isYes,
   navPosition,
   navTarget,
   oneLine,
   orderPast,
   promptKey,
+  promptLine,
+  PROMPTS_KEPT,
+  summaryBasis,
+  summaryPrompts,
+  ticketBand,
+  ticketCandidates,
+  ticketMentions,
+  titleLine,
   summaryInput,
   summaryLine,
   textWidth,
@@ -19,6 +29,7 @@ import {
   viewSpan,
   withLivePrompt,
   withPastPrompts,
+  withPrompt,
   withoutBadStops,
 } from '../hooks/logic'
 import type { Seen } from '../hooks/logic'
@@ -317,5 +328,76 @@ describe('summary text', () => {
     expect(Array.from(cut).length).toBe(4001)
     expect(cut.endsWith('😀…')).toBe(true)
     expect(summaryInput(cut)).toBe(cut)
+  })
+})
+
+describe('ticket ids', () => {
+  test('graph-ops and Jira ids are found in order, each once', () => {
+    expect(ticketCandidates('/graph-ops:process-ticket SCMP-00001')).toEqual(['SCMP-00001'])
+    expect(ticketCandidates('PROJ-123 と AB2-7、もう一度 PROJ-123')).toEqual(['PROJ-123', 'AB2-7'])
+  })
+
+  test('standards, versions and lower-case words are not tickets', () => {
+    expect(ticketCandidates('UTF-8 で RFC-2119 に従う、sha-256、A-1、my-PROJ-1x')).toEqual([])
+  })
+
+  test('the title graph-engine prints is read for that ticket only', () => {
+    const out = JSON.stringify({ id: 'SCMP-00001', title: ' 帯を\n実装する ' })
+    expect(graphTicketTitle(out, 'SCMP-00001')).toBe('帯を 実装する')
+    expect(graphTicketTitle(out, 'SCMP-00002')).toBe(null)
+    expect(graphTicketTitle('not json', 'SCMP-00001')).toBe(null)
+  })
+
+  test('replies of the model', () => {
+    expect(isYes('yes')).toBe(true)
+    expect(isYes('Yes.')).toBe(true)
+    expect(isYes('no')).toBe(false)
+    expect(titleLine('「ログイン画面のバグ」')).toBe('ログイン画面のバグ')
+    expect(titleLine('NONE')).toBe(null)
+  })
+
+  test('the mentions of a ticket are cut around each occurrence', () => {
+    const text = `${'x'.repeat(1000)} PROJ-1 title here ${'y'.repeat(1000)}`
+    const found = ticketMentions([text, 'nothing'], 'PROJ-1', 6000, 10)
+    expect(found).toBe('x'.repeat(9) + ' PROJ-1 title her')
+    expect(ticketMentions(['nothing'], 'PROJ-1')).toBe('')
+  })
+
+  test('the band shows the id, and the title when known, cut to fit', () => {
+    expect(ticketBand({ id: 'PROJ-1', title: null, source: 'prompt' }, 40)).toEqual({ id: 'PROJ-1', title: '' })
+    expect(ticketBand({ id: 'PROJ-1', title: 'abcdefghij', source: 'transcript' }, 12)).toEqual({ id: 'PROJ-1', title: 'abcd…' })
+  })
+})
+
+describe('the prompts the summary is made from', () => {
+  test('a slash command is kept as typed, on one line', () => {
+    expect(promptLine('ignored', { name: 'graph-ops:process-ticket', args: 'SCMP-1' })).toBe('/graph-ops:process-ticket SCMP-1')
+    expect(promptLine('a\n  b')).toBe('a b')
+  })
+
+  test('the first prompt stays and the newest are kept; a repeat of the last is not', () => {
+    let kept: string[] = []
+    for (let i = 1; i <= PROMPTS_KEPT + 5; i++) kept = withPrompt(kept, `p${i}`)
+    expect(kept.length).toBe(PROMPTS_KEPT)
+    expect(kept[0]).toBe('p1')
+    expect(kept[kept.length - 1]).toBe(`p${PROMPTS_KEPT + 5}`)
+    expect(withPrompt(['a', 'b'], 'b')).toEqual(['a', 'b'])
+  })
+
+  test('the summary is asked for the first prompt and the newest, numbered as said', () => {
+    expect(summaryPrompts(['a', 'b'])).toBe('1. a\n2. b')
+    const many = Array.from({ length: 12 }, (_, i) => `p${i + 1}`)
+    expect(summaryPrompts(many).split('\n')).toEqual(['1. p1', '5. p5', '6. p6', '7. p7', '8. p8', '9. p9', '10. p10', '11. p11', '12. p12'])
+  })
+
+  test('a summary stored before the basis existed counts as one prompt', () => {
+    expect(summaryBasis({ status: 'idle' })).toBe(0)
+    expect(summaryBasis({ status: 'done', text: 't' })).toBe(1)
+    expect(summaryBasis({ status: 'done', text: 't', basis: 4 })).toBe(4)
+  })
+
+  test('the last summary shows while a new one runs and after one fails', () => {
+    expect(bandText('first', { status: 'pending', token: 'x', text: 'old' }, 40)).toEqual({ kind: 'summary', text: 'old' })
+    expect(bandText('first', { status: 'failed', reason: 'api-error', text: 'old' }, 40)).toEqual({ kind: 'summary', text: 'old' })
   })
 })

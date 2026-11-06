@@ -25,7 +25,13 @@ type Reply = { isAnswered: true; text: string } | { isAnswered: false; reason: '
 function engine(
   on: On,
   reply: Reply = { isAnswered: true, text: 'ログインバグの修正' },
-  options: { modelDelayMs?: number; messagesFailures?: number; messagesDeny?: string } = {},
+  options: {
+    modelDelayMs?: number
+    messagesFailures?: number
+    messagesDeny?: string
+    /** A reply of its own for some calls, by the call's system prompt. */
+    answer?: (system: string, prompt: string) => string | undefined
+  } = {},
 ) {
   const clock = mock.clock(on)
   const calls = { complete: [] as string[], scroll: [] as string[], messages: 0, logs: [] as string[] }
@@ -35,6 +41,8 @@ function engine(
   on('model.complete', async (_, e) => {
     calls.complete.push(e.prompt)
     if (options.modelDelayMs !== undefined) await clock.sleep(options.modelDelayMs)
+    const own = options.answer?.(e.system ?? '', e.prompt)
+    if (own !== undefined) return { value: { isAnswered: true as const, text: own, usage: USAGE } } as never
     const value =
       reply.isAnswered
         ? { isAnswered: true as const, text: reply.text, usage: USAGE }
@@ -104,7 +112,7 @@ test('with no prompt yet the band draws a placeholder and four buttons', async (
   }
 })
 
-test('the first prompt is summarized once, and later prompts are not', async ($, on) => {
+test('the summary is made again each time the person says more', async ($, on) => {
   const { clock, calls } = engine(on)
   await start($)
   await say($, 'u1', 'ログイン画面でエラーになるバグを直してほしい')
@@ -114,7 +122,11 @@ test('the first prompt is summarized once, and later prompts are not', async ($,
   await say($, 'u3', 'ありがとう')
   await clock.settle()
 
-  expect(calls.complete).toEqual(['ログイン画面でエラーになるバグを直してほしい'])
+  expect(calls.complete).toEqual([
+    '1. ログイン画面でエラーになるバグを直してほしい',
+    '1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して',
+    '1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して\n3. ありがとう',
+  ])
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /ログインバグの修正/ }))).toBeDefined()
   await ui.unmount()
@@ -163,7 +175,7 @@ test('a resumed session summarizes its first transcript prompt', async ($, on) =
   )
   await start($)
   await clock.settle()
-  expect(calls.complete).toEqual(['the very first ask'])
+  expect(calls.complete).toEqual(['1. the very first ask\n2. second ask'])
 })
 
 test('a summary left pending by a lost environment is marked interrupted, not rerun', async ($, on) => {
@@ -195,7 +207,7 @@ test('meta prompts, slash commands and others\' messages are not the first promp
   expect(calls.complete.length).toBe(0)
   await $.prompt.submit({ text: 'the real one', origin: COMPOSER, wait: false })
   await clock.settle()
-  expect(calls.complete).toEqual(['the real one'])
+  expect(calls.complete).toEqual(['1. the real one'])
 })
 
 test('each button asks for the right prompt, and none goes past the ends', async ($, on) => {
@@ -539,5 +551,87 @@ test('after scrolling by hand, the buttons step from the prompt on screen', asyn
   // With no prompt row on screen, the cursor (still the end here) counts.
   await ui.press({ key: 'prev' })
   expect(calls.scroll).toEqual(['u2', 'u3', 'u4'])
+  await ui.unmount()
+})
+
+/** The model's replies in the ticket tests, by what it is asked. */
+function ticketAnswers(work: 'yes' | 'no', title = 'NONE') {
+  return (system: string) =>
+    system.includes('yes') ? work : system.includes('タイトル') ? title : undefined
+}
+
+test('a skill run on a graph-ops ticket shows the ticket and its title, not a summary', async ($, on) => {
+  const { clock, calls } = engine(on)
+  const runs: string[][] = []
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    return { value: { exitCode: 0, stdout: JSON.stringify({ id: 'SCMP-00001', title: '帯を実装する' }), stderr: '' } } as never
+  })
+  await start($)
+  const command = { name: 'graph-ops:process-ticket', args: 'SCMP-00001' }
+  await $.prompt.submit({ text: '/graph-ops:process-ticket SCMP-00001', origin: COMPOSER, wait: false, command })
+  await clock.settle()
+
+  expect(runs).toEqual([['graph-engine', 'get-ticket', 'SCMP-00001']])
+  // A command naming the id asks to work on it: no model call to judge it, and no summary.
+  expect(calls.complete).toEqual([])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: / 帯を実装する/ })).toBeDefined()
+  await ui.unmount()
+
+  // Later prompts leave the ticket in place and make no summary.
+  await say($, 'u2', 'テストも追加して')
+  await clock.settle()
+  expect(calls.complete).toEqual([])
+})
+
+test('a ticket only mentioned is no ticket of the session: the summary goes on', async ($, on) => {
+  const { clock, calls } = engine(on, { isAnswered: true, text: '仕様の確認' }, { answer: ticketAnswers('no') })
+  await start($)
+  await say($, 'u1', 'PROJ-12 の仕様ってどうなってたっけ')
+  await clock.settle()
+  expect(calls.complete).toEqual(['チケット ID: PROJ-12\n\n依頼:\nPROJ-12 の仕様ってどうなってたっけ', '1. PROJ-12 の仕様ってどうなってたっけ'])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /仕様の確認/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a ticket graph-ops does not know shows its id, then its title once the transcript has it', async ($, on) => {
+  const { clock, transcript } = engine(on, undefined, { answer: ticketAnswers('yes', 'ログイン画面のバグ') })
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: 'TICKET_NOT_FOUND' } }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  await start($)
+  await say($, 'u1', 'Jira の PROJ-123 を対応して')
+  await clock.settle()
+
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'PROJ-123' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /ログイン画面のバグ/ })).toBeUndefined()
+  await ui.unmount()
+
+  // A skill read the ticket; the turn ends.
+  transcript.push({ role: 'user', text: 'Jira の PROJ-123 を対応して', toolUses: [] })
+  transcript.push({ role: 'assistant', text: 'PROJ-123「ログイン画面のバグ」を確認します', toolUses: [] })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answered' } as never)
+  await clock.settle()
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: / ログイン画面のバグ/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the summary keeps showing while a new one is made', async ($, on) => {
+  const { clock, calls } = engine(on, undefined, { modelDelayMs: 1000 })
+  await start($)
+  await say($, 'u1', 'one')
+  await clock.settle()
+  await clock.advance(1000) // the first summary comes back
+  await clock.settle()
+  await say($, 'u2', 'two')
+  await clock.advance(10)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(calls.complete.length).toBe(2)
+  expect(await ui.find({ type: 'Text', text: /ログインバグの修正/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /要約中/ })).toBeUndefined()
   await ui.unmount()
 })

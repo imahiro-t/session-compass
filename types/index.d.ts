@@ -1,17 +1,38 @@
 // session-compass: the values this mod keeps in `$.state` for the session.
 
 /**
- * Where the one-time summary of the session's first prompt stands.
+ * Where the summary of the session stands. It is made again each time the
+ * person says something new, from the prompts so far.
  *
- * `pending` carries the token of the module environment that started the
- * summary, so a later environment (after a hot reload or a worker respawn)
+ * `basis` is how many of the kept prompts (`prompts`) the summary was asked
+ * for; a summary stored before it existed counts as one. `text` on `pending`
+ * and `failed` is the last summary made, still shown while a new one runs or
+ * after one fails. `pending` carries the token of the module environment that
+ * started it, so a later environment (after a hot reload or a worker respawn)
  * can tell a summary it lost from one it is still running.
  */
 export type Summary =
   | { status: 'idle' }
-  | { status: 'pending'; token: string }
-  | { status: 'done'; text: string }
-  | { status: 'failed'; reason: string }
+  | { status: 'pending'; token: string; basis?: number; text?: string }
+  | { status: 'done'; text: string; basis?: number }
+  | { status: 'failed'; reason: string; basis?: number; text?: string }
+
+/**
+ * The ticket the session works on, found in the person's prompts (a ticket
+ * id such as `SCMP-00001` or `PROJ-123`). Once found the band shows it in
+ * place of the summary for the rest of the session.
+ *
+ * `title` is null until it is known: from `graph-engine get-ticket` for a
+ * graph-ops ticket (`source: 'graph-ops'`), else from the transcript once the
+ * ticket's title shows up there (`source: 'transcript'`). `titleTries`
+ * counts the transcript searches that found none; they stop at three.
+ */
+export type Ticket = {
+  id: string
+  title: string | null
+  source: 'graph-ops' | 'transcript' | 'prompt'
+  titleTries?: number
+}
 
 /**
  * A prompt seen only by drawing its transcript row (e.g. after a resume):
@@ -40,6 +61,9 @@ declare module 'claude-code' {
       firstPrompt: string | null
       summary: Summary
       nav: Nav
+      /** The person's prompts, each cut short: the first and the newest ones. */
+      prompts: string[]
+      ticket: Ticket | null
     }
   }
 }
