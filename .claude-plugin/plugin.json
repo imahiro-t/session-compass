@@ -2,6 +2,9 @@
   "name": "session-compass",
   "version": "0.1.0",
   "description": "Session Compass: a band above the Claude Code prompt that shows a summary of the session and buttons to step back and forth through the conversation",
-  "author": { "name": "Takashi Imahiro" },
-  "license": "MIT"
+  "author": {
+    "name": "Takashi Imahiro"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
 }
