@@ -1,5 +1,5 @@
 import { atom, read } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionMessagesResult } from 'claude-code'
 
 import type { Nav, PastPrompt, Summary } from '../types'
 import {
@@ -93,12 +93,17 @@ async function writeNav($: Dollar, what: string, change: (nav: Nav) => Nav | nul
 
 /**
  * The person's prompts in the transcript, oldest first, and whether that is
- * the whole transcript: `$.session.messages()` holds the newest 4096 entries
- * only, so a full answer may have lost its head.
+ * the whole transcript. `$.session.messages()` holds the newest 4096 entries
+ * only, so an answer of exactly 4096 counts as not whole too: at the limit
+ * there is no telling a lost head from a transcript that happens to be 4096
+ * entries long. When the read is refused (`{ deny }`), `texts` is empty,
+ * `isWhole` is false and `deny` gives the reason.
  */
-async function transcriptPrompts($: Dollar): Promise<{ texts: string[]; isWhole: boolean }> {
-  const messages = await $.session.messages()
-  if ('deny' in messages) return { texts: [], isWhole: false }
+async function transcriptPrompts($: Dollar): Promise<{ texts: string[]; isWhole: boolean; deny?: string }> {
+  // Typed wide on purpose: the main conversation's read is never denied by
+  // the type, yet a `session.messages` hook may still answer `{ deny }`.
+  const messages = (await $.session.messages()) as SessionMessagesResult
+  if (!Array.isArray(messages)) return { texts: [], isWhole: false, deny: messages.deny }
   return { texts: userPromptTexts(messages), isWhole: messages.length < MESSAGES_LIMIT }
 }
 
@@ -198,13 +203,16 @@ async function onStart($: Dollar): Promise<void> {
 
   // A resumed session has prompts this process never saw submitted. Only a
   // whole transcript names its first prompt: past 4096 entries the head is
-  // gone, and the oldest prompt left is not the session's first.
+  // gone, and the oldest prompt left is not the session's first. A refused
+  // read names none either.
   const first = await $.state.get(FIRST_PROMPT)
   let prompt = first.value ?? null
   if (prompt === null) {
-    const { texts, isWhole } = await transcriptPrompts($)
+    const { texts, isWhole, deny } = await transcriptPrompts($)
     const found = texts[0]
-    if (!isWhole) {
+    if (deny !== undefined) {
+      debug($, `could not read the transcript: ${deny}: its first prompt is not known`)
+    } else if (!isWhole) {
       debug($, 'the transcript is longer than $.session.messages() returns: its first prompt is not known')
     } else if (found !== undefined) {
       const kept = summaryInput(found)

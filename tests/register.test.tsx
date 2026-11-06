@@ -24,7 +24,7 @@ type Reply = { isAnswered: true; text: string } | { isAnswered: false; reason: '
 function engine(
   on: On,
   reply: Reply = { isAnswered: true, text: 'ログインバグの修正' },
-  options: { modelDelayMs?: number; messagesFailures?: number } = {},
+  options: { modelDelayMs?: number; messagesFailures?: number; messagesDeny?: string } = {},
 ) {
   const clock = mock.clock(on)
   const calls = { complete: [] as string[], scroll: [] as string[], messages: 0, logs: [] as string[] }
@@ -49,6 +49,7 @@ function engine(
       messagesFailures -= 1
       throw new Error('transcript unreadable')
     }
+    if (options.messagesDeny !== undefined) return { value: { deny: options.messagesDeny } }
     return { value: transcript }
   })
   // The kit has no transcript to scroll, so `$.ui.scroll` to a row fails
@@ -396,9 +397,26 @@ test('a transcript past what messages() returns names no first prompt', async ($
   await start($)
   await clock.settle()
   expect(calls.complete).toEqual([])
+  expect(calls.logs).toContainEqual(
+    'session-compass: the transcript is longer than $.session.messages() returns: its first prompt is not known',
+  )
+  expect(calls.logs.filter(line => line.includes('could not read the transcript'))).toEqual([])
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /まだプロンプトがありません/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('a refused messages() read says why and names no first prompt', async ($, on) => {
+  const { clock, calls, transcript } = engine(on, undefined, { messagesDeny: 'no transcript for you' })
+  transcript.push({ role: 'user', text: 'fix the login bug', toolUses: [] })
+  await start($)
+  await clock.settle()
+  expect(calls.messages).toBeGreaterThan(0)
+  expect(calls.logs).toContainEqual(
+    'session-compass: could not read the transcript: no transcript for you: its first prompt is not known',
+  )
+  expect(calls.logs.filter(line => line.includes('longer than'))).toEqual([])
+  expect(calls.complete).toEqual([])
 })
 
 test('the two paths started at the same moment still summarize once', async ($, on) => {
