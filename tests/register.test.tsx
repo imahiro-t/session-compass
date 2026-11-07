@@ -790,3 +790,102 @@ test('a session on a ticket has no 🔁, even in manual mode', { options: { summ
   expect(await ui.find({ key: 'refresh' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a slash command the person typed is a stop, in its place in the transcript', async ($, on) => {
+  const { clock, calls, transcript } = engine(on)
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  // The band was loaded late into a session with a slash command between two prompts.
+  transcript.push(
+    { role: 'user', text: 'one', toolUses: [] },
+    {
+      role: 'user',
+      text: '<command-message>graph-ops:autopilot-tree</command-message>\n<command-name>/graph-ops:autopilot-tree</command-name>\n<command-args>SCMP-00001</command-args>',
+      toolUses: [],
+    },
+    { role: 'user', text: 'two', toolUses: [] },
+  )
+  await start($)
+  await clock.settle()
+  // Drawn newest first, as scrolling up shows them; the command's row as the terminal shows it.
+  await drawRow($, 'r2', 'two')
+  await drawRow($, 'rc', '/graph-ops:autopilot-tree SCMP-00001')
+  await drawRow($, 'r1', 'one')
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'first' })
+  await ui.press({ key: 'latest' })
+  // The command sits between one and two, not ahead of them.
+  expect(calls.scroll).toEqual(['r1', 'r2'])
+  await ui.unmount()
+})
+
+test('⏬ goes to the end of the newest row, its last tool call\'s for a reply, newest first', async ($, on) => {
+  const { clock, calls } = engine(on)
+  await start($)
+  await say($, 'u1', 'one')
+  // The reply: text, then two tool calls, the last drawn lowest.
+  await $.session.append({
+    door: 'response',
+    origin: { kind: 'model' } as never,
+    uuid: 'a1',
+    message: {
+      type: 'assistant',
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'looking' },
+        { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: {} },
+        { type: 'tool_use', id: 'toolu_2', name: 'Read', input: {} },
+      ],
+    } as never,
+  })
+  // A subagent's row is not the session's end.
+  await $.session.append({
+    door: 'response',
+    origin: { kind: 'model' } as never,
+    uuid: 'sub1',
+    agentId: 'agent-1',
+    message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'sub' }] } as never,
+  })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'latest' })
+  // The kit's transcript lands nowhere: each row is tried, newest first, then the prompt.
+  const tried = calls.logs.filter(l => /could not scroll to the end of/.test(l)).map(l => /end of (\S+):/.exec(l)![1])
+  expect(tried).toEqual(['toolu_2', 'u1'])
+  expect(calls.scroll).toEqual(['u1'])
+  await ui.unmount()
+})
+
+test('a skill that reads the ticket gives its title from the tool result, with no model call', async ($, on) => {
+  const { clock, calls, transcript } = engine(on, undefined, { answer: ticketAnswers('yes', 'NONE') })
+  // graph-engine is not on this process's PATH.
+  on('process.run', () => {
+    throw new Error('spawn graph-engine ENOENT')
+  })
+  on('turn.complete', () => ({ text: '' }))
+  await start($)
+  const command = { name: 'graph-ops:autopilot-tree', args: 'SCMP-00001 --run r1' }
+  await $.prompt.submit({ text: '/graph-ops:autopilot-tree SCMP-00001 --run r1', origin: COMPOSER, wait: false, command })
+  await clock.settle()
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
+  await ui.unmount()
+
+  // The skill read the ticket with a tool; its record holds the title.
+  transcript.push({
+    role: 'user',
+    text: '',
+    toolUses: [],
+    toolResults: [{ tool_use_id: 't1', text: '{\n  "id": "SCMP-00001",\n  "title": "帯を実装する"\n}', isError: false }],
+  } as never)
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answered' } as never)
+  await clock.settle()
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: / 帯を実装する/ })).toBeDefined()
+  await ui.unmount()
+  // No model call looked for the title.
+  expect(calls.complete.filter(p => p.includes('抜粋'))).toEqual([])
+})

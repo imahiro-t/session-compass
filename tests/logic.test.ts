@@ -5,6 +5,13 @@ import {
   EMPTY_TEXT,
   PENDING_NOTE,
   bandText,
+  commandLine,
+  drawnRowIds,
+  firstPromptRow,
+  lastDrawnRowId,
+  parseRows,
+  rowIdOf,
+  typedText,
   graphTicketTitle,
   isOwnPrompt,
   isStopId,
@@ -21,6 +28,7 @@ import {
   ticketBand,
   ticketCandidates,
   ticketMentions,
+  structuredTitle,
   titleLine,
   summaryInput,
   summaryLine,
@@ -175,7 +183,7 @@ describe('the nav', () => {
     expect(JSON.stringify(next).length).toBeLessThan(200)
   })
 
-  test('userPromptTexts keeps the person\'s rows only', () => {
+  test('userPromptTexts keeps the person\'s rows only, slash commands as typed', () => {
     expect(
       userPromptTexts([
         { role: 'user', text: ' hi ' },
@@ -183,10 +191,30 @@ describe('the nav', () => {
         { role: 'user', text: '', toolResults: [] },
         { role: 'user', text: 'result', toolResults: [{}] },
         { role: 'user', text: '<command-name>/clear</command-name>' },
+        {
+          role: 'user',
+          text: '<command-message>graph-ops:autopilot-tree</command-message>\n<command-name>/graph-ops:autopilot-tree</command-name>\n<command-args>SCMP-00001 --run r1</command-args>',
+        },
+        { role: 'user', text: '<local-command-stdout>ok</local-command-stdout>' },
         { role: 'user', text: '<task-notification>done</task-notification>' },
         { role: 'user', text: 'bye' },
       ]),
-    ).toEqual(['hi', 'bye'])
+    ).toEqual(['hi', '/clear', '/graph-ops:autopilot-tree SCMP-00001 --run r1', 'bye'])
+  })
+
+  test('the row an appended message draws last: its last tool call, else itself', () => {
+    expect(rowIdOf('m1', [{ type: 'text', text: 'a' }, { type: 'tool_use', id: 't1' }, { type: 'tool_use', id: 't2' }])).toBe('t2')
+    expect(rowIdOf('m1', [{ type: 'text', text: 'a' }])).toBe('m1')
+    expect(rowIdOf('m1', 'plain')).toBe('m1')
+    expect(rowIdOf('m1', [null, { type: 'tool_use' }])).toBe('m1')
+  })
+
+  test('a stored slash command reads back as typed; other text is as it is', () => {
+    expect(commandLine('<command-name>/model</command-name>\n<command-args> haiku </command-args>')).toBe('/model haiku')
+    expect(commandLine('<command-name>graph-ops:ui</command-name>')).toBe('/graph-ops:ui')
+    expect(commandLine('plain text')).toBe(null)
+    expect(typedText('<command-name>/clear</command-name>')).toBe('/clear')
+    expect(typedText('/graph-ops:autopilot-tree SCMP-00001')).toBe('/graph-ops:autopilot-tree SCMP-00001')
   })
 })
 
@@ -506,5 +534,86 @@ describe('which way the viewport moves', () => {
     // person reads, not past it to c.
     expect(navTarget('prev', ids, 'd', view, false)?.id).toBe('c')
     expect(navTarget('prev', ids, 'd', view, true)?.id).toBe('d')
+  })
+})
+
+describe('the transcript file', () => {
+  const lines = [
+    { type: 'permission-mode' },
+    { type: 'user', uuid: 'meta1', isMeta: true, message: { content: 'Base directory for this skill' } },
+    { type: 'user', uuid: 'n1', origin: { kind: 'task-notification' }, message: { content: '<task-notification>x</task-notification>' } },
+    { type: 'user', uuid: 's1', isSidechain: true, origin: { kind: 'human' }, message: { content: 'a subagent prompt' } },
+    {
+      type: 'user',
+      uuid: 'c1',
+      origin: { kind: 'human' },
+      message: { content: '<command-message>graph-ops:autopilot-tree</command-message>\n<command-name>/graph-ops:autopilot-tree</command-name>\n<command-args>SCMP-00001</command-args>' },
+    },
+    { type: 'user', uuid: 'p2', origin: { kind: 'human' }, message: { content: [{ type: 'text', text: 'next prompt' }] } },
+    { type: 'assistant', uuid: 'a1', message: { content: [{ type: 'text', text: 'ok' }] } },
+    { type: 'assistant', uuid: 'a2', message: { content: [{ type: 'tool_use', id: 'toolu_9', name: 'Bash' }] } },
+    { type: 'user', uuid: 'r1', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_9', content: 'done' }] } },
+    { type: 'assistant', uuid: 'a3', message: { content: [{ type: 'thinking', thinking: '...' }] } },
+    { type: 'api-request' },
+  ]
+  const text = `${lines.map(l => JSON.stringify(l)).join('\n')}\n{"type":"user","uuid":"cut`
+
+  test('a line cut at the read\'s edge is left out', () => {
+    expect(parseRows(text).length).toBe(lines.length)
+  })
+
+  test('the first prompt is the person\'s first typed row, a slash command as typed', () => {
+    expect(firstPromptRow(parseRows(text))).toEqual({ id: 'c1', text: '/graph-ops:autopilot-tree SCMP-00001' })
+  })
+
+  test('the last drawn row passes over thinking: a tool result is drawn under its call', () => {
+    expect(lastDrawnRowId(parseRows(text))).toBe('toolu_9')
+    const ending = [...lines.slice(0, 7)].map(l => JSON.stringify(l)).join('\n')
+    expect(lastDrawnRowId(parseRows(ending))).toBe('a1')
+    expect(lastDrawnRowId([])).toBe(null)
+  })
+
+  test('the newest drawn rows come newest first, each once, to the limit', () => {
+    // A notification row is drawn too; meta and subagent rows are not.
+    expect(drawnRowIds(parseRows(text), 10)).toEqual(['toolu_9', 'a1', 'p2', 'c1', 'n1'])
+    expect(drawnRowIds(parseRows(text), 2)).toEqual(['toolu_9', 'a1'])
+  })
+
+  test('a turn\'s closing line comes first: one row high, its end reaches the bottom', () => {
+    const ended = `${text}\n${JSON.stringify({ type: 'system', subtype: 'turn_duration', uuid: 'd1', durationMs: 3000 })}\n${JSON.stringify({ type: 'last-prompt' })}`
+    expect(drawnRowIds(parseRows(ended), 3)).toEqual(['d1', 'toolu_9', 'a1'])
+  })
+})
+
+describe('a ticket\'s title in a tool result', () => {
+  test('graph-ops get-ticket, pretty-printed, its children not taken for it', () => {
+    const out = JSON.stringify(
+      {
+        id: 'SCMP-00001',
+        project_id: 'proj-1',
+        title: 'プロンプト上部に帯を実装する',
+        children: [{ id: 'SCMP-00002', title: 'ログの誤りを直す' }],
+      },
+      null,
+      2,
+    )
+    expect(structuredTitle(['ran it', out], 'SCMP-00001')).toBe('プロンプト上部に帯を実装する')
+    expect(structuredTitle([out], 'SCMP-00002')).toBe('ログの誤りを直す')
+  })
+
+  test('a record cut short still gives its title', () => {
+    expect(structuredTitle(['{\n  "id": "SCMP-00001",\n  "title": "帯を実装する",\n  "description": "セッ'], 'SCMP-00001')).toBe('帯を実装する')
+  })
+
+  test('Jira: the key, then fields.summary, before the issue type\'s name', () => {
+    const issue = '{"key":"PROJ-123","fields":{"summary":"Login fails with \\"bad token\\"","issuetype":{"id":"1","name":"Bug"}}}'
+    expect(structuredTitle([issue], 'PROJ-123')).toBe('Login fails with "bad token"')
+  })
+
+  test('the newest record wins; a mention with no record gives none', () => {
+    const old = '{"id":"PROJ-1","title":"old title"}'
+    const renamed = '{"id":"PROJ-1","title":"new title"}'
+    expect(structuredTitle([old, 'talking about PROJ-1', renamed], 'PROJ-1')).toBe('new title')
+    expect(structuredTitle(['PROJ-1 is broken', '{"id":"PROJ-2","title":"other"}'], 'PROJ-1')).toBe(null)
   })
 })

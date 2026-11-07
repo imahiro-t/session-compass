@@ -21,8 +21,10 @@ import {
   ticketBand,
   ticketCandidates,
   ticketMentions,
+  structuredTitle,
   titleLine,
   unknownPrompts,
+  typedText,
   userPromptTexts,
   copyViewport,
   emptyViewport,
@@ -33,6 +35,10 @@ import {
   withPastPrompts,
   withPrompt,
   withoutBadStops,
+  rowIdOf,
+  firstPromptRow,
+  drawnRowIds,
+  parseRows,
 } from './logic'
 import type { NavKind, Viewport } from './logic'
 
@@ -59,7 +65,10 @@ const TICKET_TITLE_SYSTEM =
 /** The executable that answers for graph-ops tickets. */
 const GRAPH_ENGINE = 'graph-engine'
 /** Transcript searches for a ticket's title before giving up. */
-const TITLE_TRIES = 3
+const TITLE_TRIES = 5
+/** The least time between two searches of the transcript after tool calls, in ms. */
+const TOOL_SEARCH_GAP_MS = 2000
+let lastToolSearch = 0
 
 /** The buttons, left to right. */
 const BUTTONS: readonly { kind: NavKind; label: string }[] = [
@@ -84,6 +93,27 @@ const BUTTONS_WIDTH = BUTTONS.length * BUTTON_CELLS + (BUTTONS.length - 1) * BUT
  */
 const QUESTION_COLUMNS = 39
 
+/** Bytes of the transcript file's head ⏫ reads for the first prompt. */
+const HEAD_BYTES = 2_000_000
+/** Lines of the transcript file's tail ⏬ reads for the last row. */
+const TAIL_LINES = 200
+/** The newest rows ⏬ tries at most, newest first, until one is drawn here. */
+const END_TRIES = 30
+
+// The session's transcript file, as Claude Code's hooks name it; null until
+// one has. It moves with a resume or a /clear, so each one sets it again.
+let transcriptPath: string | null = null
+
+/** The doors whose rows the transcript draws at its end: what ⏬ goes to. */
+const NEWEST_DOORS: ReadonlySet<string> = new Set(['prompt', 'command', 'response'])
+/** How many of the newest rows ⏬ keeps to try, newest last. */
+const NEWEST_KEPT = 3
+
+/** Screens the first button climbs at most, looking for earlier prompts. */
+const WALK_STEPS = 12
+/** How long the rows a climb brought into view get to draw, in ms. */
+const WALK_WAIT_MS = 150
+
 /** `$.session.messages()` returns at most this many entries, the newest. */
 const MESSAGES_LIMIT = 4096
 
@@ -103,6 +133,26 @@ const renderBuffer = new Map<string, string>()
 // surface: where the person has scrolled to, read when a button is pressed.
 // Kept here, not in state, for the same reason as renderBuffer.
 const viewBySurface = new Map<string, Viewport>()
+
+// The ids of the newest rows appended to the main conversation, newest last:
+// where ⏬ goes. A reload empties it; the next row appended starts it again.
+const newestRows: string[] = []
+
+// The turns' closing lines drawn so far, and the newest one drawn first in
+// this process (live: the latest turn's).
+const turnLines = new Set<string>()
+let newestTurnLine: string | null = null
+
+function noteNewestTurnLine(id: string): void {
+  newestTurnLine = id
+}
+
+function noteNewestRow(id: string): void {
+  const at = newestRows.indexOf(id)
+  if (at !== -1) newestRows.splice(at, 1)
+  newestRows.push(id)
+  if (newestRows.length > NEWEST_KEPT) newestRows.shift()
+}
 
 function viewOn(surface: string): Viewport {
   let view = viewBySurface.get(surface)
@@ -327,19 +377,34 @@ async function detectTicket($: Dollar, line: string, args: string | undefined): 
  * not known (a Jira ticket a skill or a tool read, say); at most TITLE_TRIES
  * searches that find a mention but no title. Called after each turn.
  */
-async function findTicketTitle($: Dollar): Promise<void> {
+async function findTicketTitle($: Dollar, mayAskModel: boolean): Promise<void> {
   const held = await $.state.get(TICKET)
   const ticket = held.value
-  if (!ticket || ticket.title !== null || (ticket.titleTries ?? 0) >= TITLE_TRIES) return
+  if (!ticket || ticket.title !== null) return
   const messages = (await $.session.messages()) as SessionMessagesResult
   if (!Array.isArray(messages)) return
+  const results = messages.flatMap(m => (m.toolResults ?? []).map(r => r.text))
   const texts = messages.flatMap(m => [m.text, ...(m.toolResults ?? []).map(r => r.text)])
-  const mentions = ticketMentions(texts, ticket.id)
+  // A tracker's record a skill or tool read: the title, with no model.
+  const recorded = structuredTitle(texts, ticket.id)
+  if (recorded !== null) {
+    debug($, `the title of ${ticket.id} is in a tool result`)
+    await $.state.set(TICKET, { id: ticket.id, title: recorded, source: 'transcript' }, { ifVersion: held.version })
+    return
+  }
+  if (!mayAskModel || (ticket.titleTries ?? 0) >= TITLE_TRIES) return
+  // Asked again only once the transcript says more of the ticket.
+  const mentionCount = texts.reduce((n, t) => n + t.split(ticket.id).length - 1, 0)
+  if (mentionCount <= (ticket.mentionCount ?? 0)) return
+  // Tool results first: where a skill read the ticket.
+  const mentions = ticketMentions([...results, ...messages.map(m => m.text)], ticket.id)
   if (mentions === '') return
   const reply = await ask($, 'the ticket title', TICKET_TITLE_SYSTEM, `チケット ID: ${ticket.id}\n\n抜粋:\n${mentions}`, 120)
   const title = reply === null ? null : titleLine(reply)
   const next: Ticket =
-    title === null ? { ...ticket, titleTries: (ticket.titleTries ?? 0) + 1 } : { id: ticket.id, title, source: 'transcript' }
+    title === null
+      ? { ...ticket, titleTries: (ticket.titleTries ?? 0) + 1, mentionCount }
+      : { id: ticket.id, title, source: 'transcript' }
   await $.state.set(TICKET, next, { ifVersion: held.version })
 }
 
@@ -395,7 +460,9 @@ async function onStart($: Dollar): Promise<void> {
       // The prompts it said, for the summary, unless some are kept already.
       const held = await $.state.get(PROMPTS)
       if ((held.value ?? []).length === 0) {
-        const prompts = texts.map(t => promptLine(t)).reduce<string[]>((kept, line) => withPrompt(kept, line), [])
+        // A slash command with no arguments (`/clear`) says nothing to summarize.
+        const said = texts.filter(t => !/^\/\S+$/.test(t))
+        const prompts = said.map(t => promptLine(t)).reduce<string[]>((kept, line) => withPrompt(kept, line), [])
         await $.state.set(PROMPTS, prompts, { ifVersion: held.version })
       }
     }
@@ -420,6 +487,10 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
         `(cursor ${nav.cursorId ?? 'end'}, view ${view === null ? 'none' : `${view.lo}..${view.hi} at ${view.at}`}` +
         `${isViewFirst ? ', scrolled by hand' : ''}, moving ${viewport.direction ?? 'unknown'})`,
     )
+    // ⏫ and ⏬ go to the transcript's own first prompt and last row, read from
+    // its file: rows far off screen are never drawn, so the band may not know them.
+    if (kind === 'first' && (await toFirstOfFile($, surface, nav))) return
+    if (kind === 'latest' && (await toEndOfFile($, surface, nav))) return
     if (target === null) return
     debug($, `${kind} scrolls to ${target.id}`)
     // What the rows said of the old viewport no longer holds once it moves;
@@ -427,24 +498,235 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     // not land leaves the viewport, and what is known of it, as it was.
     const before = copyViewport(viewport)
     noteMove(viewport, nav.promptIds, target.index, Date.now())
-    let scrolled: { deny?: string }
-    try {
-      scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
-    } catch (error) {
-      scrolled = { deny: String(error) }
-    }
-    if (scrolled.deny !== undefined) {
+    // ⏬ goes to the end of the transcript: the bottom of the newest row on
+    // the viewport's bottom. Where none of the newest rows can be reached, it
+    // goes to the newest prompt, as the other buttons go to theirs.
+    const landed = kind === 'latest' ? await scrollToEnd($) : false
+    const denied = landed ? undefined : await scrollTo($, target.id, 'start')
+    if (denied !== undefined) {
       viewBySurface.set(surface, before)
-      debug($, `could not scroll to the prompt: ${scrolled.deny}`)
+      debug($, `could not scroll to the prompt: ${denied}`)
       return
     }
-    await writeNav($, 'cursor', stored => {
-      const current = withoutBadStops(stored)
-      return current === stored && current.cursorId === target.id ? null : { ...current, cursorId: target.id }
-    })
+    await setCursor($, target.id)
+    if (target.index === 0) await walkUp($, surface, target.id)
   } catch (error) {
     debug($, `navigation failed: ${String(error)}`)
   }
+}
+
+/** What a command printed, or null where it could not run or failed. */
+async function runText($: Dollar, argv: readonly string[]): Promise<string | null> {
+  try {
+    const run = await $.process.run(argv, { timeoutMs: 10_000 })
+    if (run.exitCode === 0) return run.stdout
+    debug($, `${argv[0]} exited ${run.exitCode}: ${run.stderr.trim().slice(0, 300)}`)
+    return null
+  } catch (error) {
+    debug($, `could not run ${argv[0]}: ${String(error)}`)
+    return null
+  }
+}
+
+/** A transcript file of the session, with what picks it. */
+type TranscriptFile = { path: string; size: number; mtimeMs: number }
+
+/**
+ * The session's transcript files. Claude Code keeps one per working folder
+ * the session ran in, and the path its hooks name follows the folder the
+ * session was started from, which may hold none (a resume started from
+ * another folder). So beside that path, every folder under the projects
+ * folder is looked in for a file of the same name.
+ */
+async function transcriptFiles($: Dollar): Promise<TranscriptFile[]> {
+  if (transcriptPath === null) return []
+  const cut = transcriptPath.lastIndexOf('/')
+  const name = transcriptPath.slice(cut + 1)
+  const projects = transcriptPath.slice(0, transcriptPath.slice(0, cut).lastIndexOf('/'))
+  const paths = new Set<string>([transcriptPath])
+  try {
+    for (const entry of await $.fs.list(projects)) {
+      if (entry.kind === 'dir') paths.add(`${projects}/${entry.name}/${name}`)
+    }
+  } catch (error) {
+    debug($, `could not list ${projects}: ${String(error)}`)
+  }
+  const files: TranscriptFile[] = []
+  for (const path of paths) {
+    try {
+      if (!(await $.fs.exists(path))) continue
+      const stat = await $.fs.stat(path)
+      files.push({ path, size: stat.size, mtimeMs: stat.mtimeMs })
+    } catch {
+      // Gone meanwhile, or not readable: not one to read.
+    }
+  }
+  if (files.length === 0) debug($, `no transcript file named ${name} under ${projects}`)
+  return files
+}
+
+/**
+ * ⏫ from the transcript file: puts the session's first prompt on top, by the
+ * id its file gives, and makes it a stop if the band did not know it. False
+ * where the file cannot be read or the scroll did not land.
+ */
+async function toFirstOfFile($: Dollar, surface: string, nav: Nav): Promise<boolean> {
+  // The largest file holds the session from its start.
+  let first: { id: string; text: string } | null = null
+  for (const file of (await transcriptFiles($)).sort((a, b) => b.size - a.size)) {
+    const head = await runText($, ['head', '-c', String(HEAD_BYTES), file.path])
+    first = head === null ? null : firstPromptRow(parseRows(head))
+    if (first !== null) break
+  }
+  if (first === null) return false
+  const viewport = viewOn(surface)
+  const before = copyViewport(viewport)
+  const index = nav.promptIds.indexOf(first.id)
+  noteMove(viewport, nav.promptIds, Math.max(0, index), Date.now())
+  const denied = await scrollTo($, first.id, 'start')
+  if (denied !== undefined) {
+    viewBySurface.set(surface, before)
+    debug($, `could not scroll to the transcript's first prompt ${first.id}: ${denied}`)
+    return false
+  }
+  debug($, `first lands on ${first.id}, the transcript's first prompt`)
+  if (index === -1) {
+    const keys = (await transcriptPrompts($)).texts.map(promptKey)
+    await writeNav($, 'first prompt', current =>
+      withPastPrompts(withoutBadStops(current), [{ id: first.id, key: promptKey(first.text) }], keys),
+    )
+  }
+  await setCursor($, first.id)
+  return true
+}
+
+/**
+ * ⏬ from the transcript file: puts the bottom of the row drawn lowest on the
+ * viewport's bottom, by the id the file's last rows give, the cursor at the
+ * end of the transcript. False where the file cannot be read or the scroll
+ * did not land.
+ */
+async function toEndOfFile($: Dollar, surface: string, nav: Nav): Promise<boolean> {
+  // The newest rows, newest file first: the file written last holds the
+  // session's newest rows, though not all of them may be drawn here.
+  const candidates: string[] = []
+  for (const file of (await transcriptFiles($)).sort((a, b) => b.mtimeMs - a.mtimeMs)) {
+    if (candidates.length >= END_TRIES) break
+    const tail = await runText($, ['tail', '-n', String(TAIL_LINES), file.path])
+    if (tail === null) continue
+    for (const id of drawnRowIds(parseRows(tail), END_TRIES)) {
+      if (!candidates.includes(id)) candidates.push(id)
+    }
+  }
+  // The closing line of the latest turn as drawn here: tried next to the
+  // file's newest row, in case the file's id for that line is not its row's.
+  if (newestTurnLine !== null && !candidates.includes(newestTurnLine)) {
+    candidates.splice(Math.min(1, candidates.length), 0, newestTurnLine)
+  }
+  if (candidates.length === 0) return false
+  const viewport = viewOn(surface)
+  const before = copyViewport(viewport)
+  noteMove(viewport, nav.promptIds, nav.promptIds.length, Date.now())
+  let last: string | null = null
+  let skipped = 0
+  for (const id of candidates.slice(0, END_TRIES)) {
+    const denied = await scrollTo($, id, 'end')
+    if (denied === undefined) {
+      last = id
+      break
+    }
+    skipped += 1
+  }
+  if (last === null) {
+    viewBySurface.set(surface, before)
+    debug($, `could not scroll to the end of any of the transcript's last ${skipped} rows`)
+    return false
+  }
+  debug($, `latest lands on the end of ${last}, the transcript's last row${skipped > 0 ? ` drawn here (${skipped} newer not drawn)` : ''}`)
+  await writeNav($, 'cursor', current => (current.cursorId === null ? null : { ...current, cursorId: null }))
+  return true
+}
+
+/**
+ * Puts the bottom of the newest row of the transcript on the viewport's
+ * bottom, trying the newest rows appended, newest first; true once one
+ * landed.
+ */
+async function scrollToEnd($: Dollar): Promise<boolean> {
+  for (const id of [...newestRows].reverse()) {
+    const denied = await scrollTo($, id, 'end')
+    if (denied === undefined) {
+      debug($, `latest lands on the end of ${id}`)
+      return true
+    }
+    debug($, `could not scroll to the end of ${id}: ${denied}`)
+  }
+  return false
+}
+
+/** Writes the cursor (and drops stops that are no real messages). */
+async function setCursor($: Dollar, id: string): Promise<void> {
+  await writeNav($, 'cursor', stored => {
+    const current = withoutBadStops(stored)
+    return current === stored && current.cursorId === id ? null : { ...current, cursorId: id }
+  })
+}
+
+/** Scrolls a row into view; the reason when it did not move. */
+async function scrollTo($: Dollar, id: string, block: 'start' | 'end'): Promise<string | undefined> {
+  try {
+    return (await $.ui.scroll({ to: { requestId: id }, block })).deny
+  } catch (error) {
+    return String(error)
+  }
+}
+
+/** Waits `ms` on the session's clock. */
+function sleep($: Dollar, ms: number): Promise<void> {
+  return new Promise(resolve => {
+    $.clock.after(ms, () => resolve())
+  })
+}
+
+/**
+ * Climbs from the first prompt the mod knows to the session's first one.
+ *
+ * Only drawn rows tell their ids, and a long or resumed transcript draws
+ * only the rows near the viewport, so the earliest prompt known may not be
+ * the first. While the transcript holds more of the person's prompts than
+ * the mod knows, it shows the screen above the known first prompt (that
+ * prompt at the bottom), lets the rows there draw, and moves on to any
+ * earlier prompt they show; at the last one found it puts that prompt on
+ * top. It stops where the screen above shows no prompt (a reply longer than
+ * the screen) or a scroll is refused.
+ */
+async function walkUp($: Dollar, surface: string, from: string): Promise<void> {
+  const nav = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV)
+  const { texts } = await transcriptPrompts($)
+  if (texts.length <= nav.promptIds.length) return
+  debug($, `the transcript has ${texts.length} prompts, the band knows ${nav.promptIds.length}: looking above ${from}`)
+  let current = from
+  for (let step = 0; step < WALK_STEPS; step++) {
+    const denied = await scrollTo($, current, 'end')
+    if (denied !== undefined) {
+      debug($, `could not look above ${current}: ${denied}`)
+      break
+    }
+    await sleep($, WALK_WAIT_MS)
+    if (renderBuffer.size > 0) await mergeBuffer($)
+    const first = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV).promptIds[0]
+    if (first === undefined || first === current) break
+    debug($, `found ${first} above ${current}`)
+    current = first
+  }
+  const ids = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV).promptIds
+  noteMove(viewOn(surface), ids, Math.max(0, ids.indexOf(current)), Date.now())
+  const denied = await scrollTo($, current, 'start')
+  if (denied !== undefined) {
+    debug($, `could not scroll to the prompt: ${denied}`)
+    return
+  }
+  if (current !== from) await setCursor($, current)
 }
 
 export const register: Register = (on, options) => {
@@ -494,10 +776,45 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => next(e))
 
+  // The newest rows of the main conversation, for ⏬: a prompt or a slash
+  // command by its id, a reply by its last tool call's id (the tool row is
+  // drawn below the reply's text) or else its own.
+  on('session.append', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined && result.deny === undefined && NEWEST_DOORS.has(e.door)) {
+      noteNewestRow(rowIdOf(e.uuid, (e.message as { content?: unknown }).content))
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
+  // The transcript file's path, which ⏫ and ⏬ read: named by the classic
+  // hooks' input, at the session's start (a resume included) and each prompt.
+  on('classic.SessionStart', ($, e, next) => {
+    transcriptPath = e.transcript_path
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('classic.UserPromptSubmit', ($, e, next) => {
+    transcriptPath = e.transcript_path
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // A skill working on a ticket reads it with a tool; its result may hold the
+  // title. Looked for (with no model) as each tool call of the session ends,
+  // at most every TOOL_SEARCH_GAP_MS.
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+    const now = Date.now()
+    if (e.agentId === undefined && now - lastToolSearch >= TOOL_SEARCH_GAP_MS) {
+      lastToolSearch = now
+      later($, 'tool.call', () => findTicketTitle($, false))
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     // A subagent's turn is not the session's.
-    if (e.agentId === undefined) later($, 'turn.complete', () => findTicketTitle($))
+    if (e.agentId === undefined) later($, 'turn.complete', () => findTicketTitle($, true))
     return result
   }).catch(($, e, next) => next(e))
 
@@ -505,7 +822,7 @@ export const register: Register = (on, options) => {
     // Drawing may not write state: remember the row, merge it later.
     const { origin, task, from, text } = e.props
     if (isStopId(e.requestId) && isOwnPrompt(origin, { task, from }) && text.trim() !== '') {
-      renderBuffer.set(e.requestId, promptKey(text))
+      renderBuffer.set(e.requestId, promptKey(typedText(text)))
       if ('onScreen' in e.props && e.props.onScreen !== undefined) {
         noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, true, Date.now())
       }
@@ -525,6 +842,17 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
     if ('onScreen' in e.props && e.props.onScreen !== undefined) {
       noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, false, Date.now())
+    }
+    return next(e)
+  })
+
+  // The line closing a turn is one row high: ⏬ can put its end on the
+  // viewport's bottom. The first time a line is drawn, its id is the newest.
+  on('ui.render', { component: 'TurnDuration' }, ($, e, next) => {
+    if (!turnLines.has(e.requestId)) {
+      turnLines.add(e.requestId)
+      noteNewestTurnLine(e.requestId)
+      debug($, `a turn's closing line is drawn under ${e.requestId}`)
     }
     return next(e)
   })

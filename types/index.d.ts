@@ -24,14 +24,18 @@ export type Summary =
  *
  * `title` is null until it is known: from `graph-engine get-ticket` for a
  * graph-ops ticket (`source: 'graph-ops'`), else from the transcript once the
- * ticket's title shows up there (`source: 'transcript'`). `titleTries`
- * counts the transcript searches that found none; they stop at three.
+ * ticket's title shows up there (`source: 'transcript'`): a tool result's
+ * record of the ticket, read with no model, or else what the model finds.
+ * `titleTries` counts the model's searches that found none (they stop at
+ * five), and `mentionCount` how often the transcript named the id at the
+ * last one, so it is asked again only once there is more.
  */
 export type Ticket = {
   id: string
   title: string | null
   source: 'graph-ops' | 'transcript' | 'prompt'
   titleTries?: number
+  mentionCount?: number
 }
 
 /**

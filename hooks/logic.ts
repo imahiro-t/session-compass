@@ -134,19 +134,172 @@ export function bandText(
 
 /**
  * Rows of `$.session.messages()` that are machinery, not something the person
- * typed: a slash command's expansion, a command's local output, a
- * notification or a reminder the engine filed as a user row.
+ * typed: a command's local output, a notification or a reminder the engine
+ * filed as a user row. (A slash command the person typed is stored as
+ * `<command-name>` markup too; `commandLine` reads it back.)
  */
 const MACHINE_ROW = /^<(command-|local-command-|task-notification|system-reminder)/
 
-/** The person's prompt rows of `$.session.messages()`, oldest first. */
+/**
+ * A slash command as the person typed it, from the markup the transcript
+ * stores it as (`<command-name>/x</command-name>` and `<command-args>`):
+ * `/x args`. Null for any other text.
+ */
+export function commandLine(text: string): string | null {
+  const name = /<command-name>\s*([^<]*?)\s*<\/command-name>/.exec(text)?.[1]
+  if (name === undefined || name === '') return null
+  const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1]?.trim() ?? ''
+  const slashed = name.startsWith('/') ? name : `/${name}`
+  return args === '' ? slashed : `${slashed} ${args}`
+}
+
+/**
+ * A prompt row's text as the person typed it: a stored slash command read
+ * back from its markup, anything else as it is. What drawn rows and
+ * transcript rows are matched by.
+ */
+export function typedText(text: string): string {
+  return commandLine(text) ?? text
+}
+
+/** One line of the session's transcript file, as far as the band reads it. */
+export type TranscriptRow = {
+  type?: unknown
+  uuid?: unknown
+  isMeta?: unknown
+  isSidechain?: unknown
+  origin?: { kind?: unknown } | null
+  message?: { content?: unknown } | null
+}
+
+/** The transcript file's lines as rows; a line cut short (at a read's edge) or not JSON is left out. */
+export function parseRows(text: string): TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    try {
+      const row = JSON.parse(line) as unknown
+      if (row !== null && typeof row === 'object') rows.push(row as TranscriptRow)
+    } catch {
+      // A line cut short at the read's edge.
+    }
+  }
+  return rows
+}
+
+/** A stored row's text blocks joined; null when it holds a tool result (not something typed). */
+function rowText(content: unknown): string | null {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return null
+  const parts: string[] = []
+  for (const block of content as { type?: unknown; text?: unknown }[]) {
+    if (block?.type === 'tool_result') return null
+    if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+  }
+  return parts.join('\n')
+}
+
+/** Whether a stored row is of the main conversation, as drawn (no subagent's, no meta row). */
+function isMainRow(row: TranscriptRow): row is TranscriptRow & { uuid: string } {
+  return typeof row.uuid === 'string' && row.isSidechain !== true && row.isMeta !== true
+}
+
+/**
+ * The first prompt the person sent, from the transcript file's rows: a user
+ * row of the main conversation that is the person's own (stamped `human`, or
+ * unstamped from before stamps), typed (no tool result) and not machinery;
+ * a slash command counts, read back as typed. Its id is what its row is drawn
+ * and scrolled to under.
+ */
+export function firstPromptRow(rows: readonly TranscriptRow[]): { id: string; text: string } | null {
+  for (const row of rows) {
+    if (row.type !== 'user' || !isMainRow(row)) continue
+    const kind = row.origin?.kind
+    if (kind !== undefined && kind !== 'human' && !(typeof kind === 'string' && OWN_KINDS.has(kind))) continue
+    const text = rowText(row.message?.content)?.trim()
+    if (text === undefined || text === '') continue
+    const typed = commandLine(text)
+    if (typed === null && MACHINE_ROW.test(text)) continue
+    return { id: row.uuid, text: typed ?? text }
+  }
+  return null
+}
+
+/**
+ * The id of the row drawn lowest in the transcript, from the file's last
+ * rows: the newest row of the main conversation that draws (a reply's text,
+ * a tool call, a tool result under its call, a prompt), by the id its row is
+ * drawn under. A reply's thinking draws no row of its own and is passed over.
+ */
+export function lastDrawnRowId(rows: readonly TranscriptRow[]): string | null {
+  return drawnRowIds(rows, 1)[0] ?? null
+}
+
+/**
+ * The ids of the rows drawn lowest in the transcript, newest first, each
+ * once, at most `limit`: what ⏬ tries in turn, since the file may hold rows
+ * this process never drew (another process appending to the same session).
+ */
+export function drawnRowIds(rows: readonly TranscriptRow[], limit: number): string[] {
+  const out: string[] = []
+  const add = (id: string) => {
+    if (!out.includes(id)) out.push(id)
+  }
+  for (let i = rows.length - 1; i >= 0 && out.length < limit; i--) {
+    const row = rows[i]!
+    // The line closing a turn (`Baked for 3s`): one row high, so its end can
+    // be put on the viewport's bottom where a reply taller than the window
+    // only ever shows its top.
+    if (row.type === 'system' && (row as { subtype?: unknown }).subtype === 'turn_duration' && isMainRow(row)) {
+      add(row.uuid)
+      continue
+    }
+    if ((row.type !== 'assistant' && row.type !== 'user') || !isMainRow(row)) continue
+    const content = row.message?.content
+    if (typeof content === 'string') {
+      if (content.trim() !== '') add(row.uuid)
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    for (let j = content.length - 1; j >= 0; j--) {
+      const block = content[j] as { type?: unknown; id?: unknown; tool_use_id?: unknown; text?: unknown } | null
+      if (block?.type === 'tool_use' && typeof block.id === 'string') add(block.id)
+      else if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') add(block.tool_use_id)
+      else if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '') add(row.uuid)
+      else continue
+      break
+    }
+  }
+  return out.slice(0, limit)
+}
+
+/**
+ * The id of the row an appended message draws last in the transcript: its
+ * last tool call's (the tool rows are drawn below the message's text), else
+ * the message's own.
+ */
+export function rowIdOf(uuid: string, content: unknown): string {
+  if (!Array.isArray(content)) return uuid
+  for (let i = content.length - 1; i >= 0; i--) {
+    const block = content[i] as { type?: unknown; id?: unknown } | null
+    if (block !== null && typeof block === 'object' && block.type === 'tool_use' && typeof block.id === 'string') {
+      return block.id
+    }
+  }
+  return uuid
+}
+
+/** The person's prompt rows of `$.session.messages()`, oldest first, slash commands included. */
 export function userPromptTexts(
   messages: readonly { role: string; text: string; toolResults?: readonly unknown[] }[],
 ): string[] {
   return messages
     .filter(m => m.role === 'user' && (m.toolResults?.length ?? 0) === 0)
-    .map(m => m.text.trim())
-    .filter(text => text !== '' && !MACHINE_ROW.test(text))
+    .map(m => {
+      const text = m.text.trim()
+      return commandLine(text) ?? (MACHINE_ROW.test(text) ? '' : text)
+    })
+    .filter(text => text !== '')
 }
 
 /**
@@ -633,6 +786,55 @@ export function titleLine(reply: string): string | null {
   const line = reply.replace(/\s+/g, ' ').trim().replace(/^["「『]|["」』]$/g, '')
   if (line === '' || /^none$/i.test(line)) return null
   return line
+}
+
+/** Keys a tracker's record names a ticket by. */
+const ID_KEYS = 'id|key|identifier|ticket|ticketId|ticket_id|issue|issueKey|number'
+/** Keys a tracker's record holds a ticket's title under, most telling first. */
+const TITLE_KEYS = ['title', 'summary', 'subject', 'name'] as const
+/** How far past the id a record's title is looked for, in characters. */
+const RECORD_REACH = 4000
+
+/** A JSON string literal's body as text. */
+function jsonString(body: string): string {
+  try {
+    return JSON.parse(`"${body}"`) as string
+  } catch {
+    return body
+  }
+}
+
+/**
+ * The ticket's title as a tool result holds it, read with no model: a JSON
+ * record (whole or cut short) that names the id under an id-like key
+ * (`"id": "SCMP-00001"`, `"key": "PROJ-123"`) and has a title-like field
+ * after it, before the next record's id (`"title"`, Jira's
+ * `"fields": { "summary" }`, `"subject"`, `"name"`). Null when no text holds
+ * one. Each text is read newest last; the last record found wins, as it is
+ * the freshest.
+ */
+export function structuredTitle(texts: readonly string[], id: string): string | null {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const named = new RegExp(`"(?:${ID_KEYS})"\\s*:\\s*"${escaped}"`, 'g')
+  const nextRecord = new RegExp(`"(?:${ID_KEYS})"\\s*:\\s*"`)
+  let found: string | null = null
+  for (const text of texts) {
+    if (!text.includes(id)) continue
+    for (const m of text.matchAll(named)) {
+      let after = text.slice(m.index + m[0].length, m.index + m[0].length + RECORD_REACH)
+      const cut = nextRecord.exec(after)
+      if (cut !== null) after = after.slice(0, cut.index)
+      for (const key of TITLE_KEYS) {
+        const field = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(after)
+        const line = field === null ? '' : jsonString(field[1]!).replace(/\s+/g, ' ').trim()
+        if (line !== '' && line !== id) {
+          found = line
+          break
+        }
+      }
+    }
+  }
+  return found
 }
 
 /**
