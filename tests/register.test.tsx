@@ -858,3 +858,34 @@ test('⏬ goes to the end of the newest row, its last tool call\'s for a reply, 
   expect(calls.scroll).toEqual(['u1'])
   await ui.unmount()
 })
+
+test('a skill that reads the ticket gives its title from the tool result, with no model call', async ($, on) => {
+  const { clock, calls, transcript } = engine(on, undefined, { answer: ticketAnswers('yes', 'NONE') })
+  // graph-engine is not on this process's PATH.
+  on('process.run', () => {
+    throw new Error('spawn graph-engine ENOENT')
+  })
+  on('turn.complete', () => ({ text: '' }))
+  await start($)
+  const command = { name: 'graph-ops:autopilot-tree', args: 'SCMP-00001 --run r1' }
+  await $.prompt.submit({ text: '/graph-ops:autopilot-tree SCMP-00001 --run r1', origin: COMPOSER, wait: false, command })
+  await clock.settle()
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
+  await ui.unmount()
+
+  // The skill read the ticket with a tool; its record holds the title.
+  transcript.push({
+    role: 'user',
+    text: '',
+    toolUses: [],
+    toolResults: [{ tool_use_id: 't1', text: '{\n  "id": "SCMP-00001",\n  "title": "帯を実装する"\n}', isError: false }],
+  } as never)
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answered' } as never)
+  await clock.settle()
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: / 帯を実装する/ })).toBeDefined()
+  await ui.unmount()
+  // No model call looked for the title.
+  expect(calls.complete.filter(p => p.includes('抜粋'))).toEqual([])
+})

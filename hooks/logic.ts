@@ -677,6 +677,55 @@ export function titleLine(reply: string): string | null {
   return line
 }
 
+/** Keys a tracker's record names a ticket by. */
+const ID_KEYS = 'id|key|identifier|ticket|ticketId|ticket_id|issue|issueKey|number'
+/** Keys a tracker's record holds a ticket's title under, most telling first. */
+const TITLE_KEYS = ['title', 'summary', 'subject', 'name'] as const
+/** How far past the id a record's title is looked for, in characters. */
+const RECORD_REACH = 4000
+
+/** A JSON string literal's body as text. */
+function jsonString(body: string): string {
+  try {
+    return JSON.parse(`"${body}"`) as string
+  } catch {
+    return body
+  }
+}
+
+/**
+ * The ticket's title as a tool result holds it, read with no model: a JSON
+ * record (whole or cut short) that names the id under an id-like key
+ * (`"id": "SCMP-00001"`, `"key": "PROJ-123"`) and has a title-like field
+ * after it, before the next record's id (`"title"`, Jira's
+ * `"fields": { "summary" }`, `"subject"`, `"name"`). Null when no text holds
+ * one. Each text is read newest last; the last record found wins, as it is
+ * the freshest.
+ */
+export function structuredTitle(texts: readonly string[], id: string): string | null {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const named = new RegExp(`"(?:${ID_KEYS})"\\s*:\\s*"${escaped}"`, 'g')
+  const nextRecord = new RegExp(`"(?:${ID_KEYS})"\\s*:\\s*"`)
+  let found: string | null = null
+  for (const text of texts) {
+    if (!text.includes(id)) continue
+    for (const m of text.matchAll(named)) {
+      let after = text.slice(m.index + m[0].length, m.index + m[0].length + RECORD_REACH)
+      const cut = nextRecord.exec(after)
+      if (cut !== null) after = after.slice(0, cut.index)
+      for (const key of TITLE_KEYS) {
+        const field = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(after)
+        const line = field === null ? '' : jsonString(field[1]!).replace(/\s+/g, ' ').trim()
+        if (line !== '' && line !== id) {
+          found = line
+          break
+        }
+      }
+    }
+  }
+  return found
+}
+
 /**
  * The parts of the transcript that mention the ticket id, each with some
  * text around it, joined and cut to `limit` code points: what the title is

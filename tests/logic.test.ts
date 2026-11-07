@@ -24,6 +24,7 @@ import {
   ticketBand,
   ticketCandidates,
   ticketMentions,
+  structuredTitle,
   titleLine,
   summaryInput,
   summaryLine,
@@ -529,5 +530,38 @@ describe('which way the viewport moves', () => {
     // person reads, not past it to c.
     expect(navTarget('prev', ids, 'd', view, false)?.id).toBe('c')
     expect(navTarget('prev', ids, 'd', view, true)?.id).toBe('d')
+  })
+})
+
+describe('a ticket\'s title in a tool result', () => {
+  test('graph-ops get-ticket, pretty-printed, its children not taken for it', () => {
+    const out = JSON.stringify(
+      {
+        id: 'SCMP-00001',
+        project_id: 'proj-1',
+        title: 'プロンプト上部に帯を実装する',
+        children: [{ id: 'SCMP-00002', title: 'ログの誤りを直す' }],
+      },
+      null,
+      2,
+    )
+    expect(structuredTitle(['ran it', out], 'SCMP-00001')).toBe('プロンプト上部に帯を実装する')
+    expect(structuredTitle([out], 'SCMP-00002')).toBe('ログの誤りを直す')
+  })
+
+  test('a record cut short still gives its title', () => {
+    expect(structuredTitle(['{\n  "id": "SCMP-00001",\n  "title": "帯を実装する",\n  "description": "セッ'], 'SCMP-00001')).toBe('帯を実装する')
+  })
+
+  test('Jira: the key, then fields.summary, before the issue type\'s name', () => {
+    const issue = '{"key":"PROJ-123","fields":{"summary":"Login fails with \\"bad token\\"","issuetype":{"id":"1","name":"Bug"}}}'
+    expect(structuredTitle([issue], 'PROJ-123')).toBe('Login fails with "bad token"')
+  })
+
+  test('the newest record wins; a mention with no record gives none', () => {
+    const old = '{"id":"PROJ-1","title":"old title"}'
+    const renamed = '{"id":"PROJ-1","title":"new title"}'
+    expect(structuredTitle([old, 'talking about PROJ-1', renamed], 'PROJ-1')).toBe('new title')
+    expect(structuredTitle(['PROJ-1 is broken', '{"id":"PROJ-2","title":"other"}'], 'PROJ-1')).toBe(null)
   })
 })

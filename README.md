@@ -20,7 +20,11 @@ When a prompt asks to work on a ticket, the band shows that ticket for the rest 
 
 - A ticket is an ID such as `SCMP-00001` or `PROJ-123` in your prompt. Standards and versions such as `UTF-8` or `RFC-2119` are not tickets.
 - An ID in a slash command's arguments counts as a request to work on it. An ID in an ordinary prompt is judged by a model call: "fix PROJ-123" fixes the band to it, "what did PROJ-12 say about this?" does not.
-- The title comes from `graph-engine get-ticket <ID>` for a [graph-ops](https://github.com/imahiro-t/graph-ops) ticket. For any other tracker (Jira and the like), it is picked up from the conversation once a skill or tool shows it, looked for after each turn (up to three tries); until then the band shows the ID alone.
+- The title is taken, whatever the tracker, from what the skill or tool working on the ticket read:
+  - A tool result that holds the ticket's record (JSON naming the ID under `id`, `key` and the like, with a `title`, `summary`, `subject` or `name`: graph-ops' `get-ticket`, Jira's `fields.summary`, ...) gives the title with no model call, looked for as each tool call ends
+  - Failing that, haiku looks for it in the parts of the conversation that mention the ID, at the end of a turn, tool results first, and again only once the ID is mentioned more (up to five tries)
+  - For a [graph-ops](https://github.com/imahiro-t/graph-ops) ticket, `graph-engine get-ticket <ID>` is also run when the ticket is found, where `graph-engine` is on the PATH
+  - Until then the band shows the ID alone
 - The ID is drawn in the theme's `suggestion` colour and the title in `claude`.
 
 ### The buttons
@@ -37,7 +41,7 @@ The question dialog takes the prompt's place, and the band with it. The ticket o
 
 - The summary sends your first prompt and your newest prompts (each cut to 600 characters) to haiku after each prompt (`auto`) or on 🔁 (`manual`).
 - A prompt holding a ticket ID that is not in a slash command's arguments is sent to haiku once, to judge whether it asks to work on the ticket.
-- For a ticket whose title is not known, the parts of the conversation around its ID (up to 6,000 characters) are sent to haiku after a turn, at most three times.
+- For a ticket whose title no tool result's record gives, the parts of the conversation around its ID (up to 6,000 characters) are sent to haiku after a turn, only when the ID is mentioned more than at the last try, at most five times.
 - `graph-engine get-ticket <ID>` runs on your machine for a ticket ID when it is found; where `graph-engine` is not installed, nothing happens.
 
 ## Install

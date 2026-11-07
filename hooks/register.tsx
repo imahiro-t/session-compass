@@ -21,6 +21,7 @@ import {
   ticketBand,
   ticketCandidates,
   ticketMentions,
+  structuredTitle,
   titleLine,
   unknownPrompts,
   typedText,
@@ -61,7 +62,10 @@ const TICKET_TITLE_SYSTEM =
 /** The executable that answers for graph-ops tickets. */
 const GRAPH_ENGINE = 'graph-engine'
 /** Transcript searches for a ticket's title before giving up. */
-const TITLE_TRIES = 3
+const TITLE_TRIES = 5
+/** The least time between two searches of the transcript after tool calls, in ms. */
+const TOOL_SEARCH_GAP_MS = 2000
+let lastToolSearch = 0
 
 /** The buttons, left to right. */
 const BUTTONS: readonly { kind: NavKind; label: string }[] = [
@@ -350,19 +354,34 @@ async function detectTicket($: Dollar, line: string, args: string | undefined): 
  * not known (a Jira ticket a skill or a tool read, say); at most TITLE_TRIES
  * searches that find a mention but no title. Called after each turn.
  */
-async function findTicketTitle($: Dollar): Promise<void> {
+async function findTicketTitle($: Dollar, mayAskModel: boolean): Promise<void> {
   const held = await $.state.get(TICKET)
   const ticket = held.value
-  if (!ticket || ticket.title !== null || (ticket.titleTries ?? 0) >= TITLE_TRIES) return
+  if (!ticket || ticket.title !== null) return
   const messages = (await $.session.messages()) as SessionMessagesResult
   if (!Array.isArray(messages)) return
+  const results = messages.flatMap(m => (m.toolResults ?? []).map(r => r.text))
   const texts = messages.flatMap(m => [m.text, ...(m.toolResults ?? []).map(r => r.text)])
-  const mentions = ticketMentions(texts, ticket.id)
+  // A tracker's record a skill or tool read: the title, with no model.
+  const recorded = structuredTitle(texts, ticket.id)
+  if (recorded !== null) {
+    debug($, `the title of ${ticket.id} is in a tool result`)
+    await $.state.set(TICKET, { id: ticket.id, title: recorded, source: 'transcript' }, { ifVersion: held.version })
+    return
+  }
+  if (!mayAskModel || (ticket.titleTries ?? 0) >= TITLE_TRIES) return
+  // Asked again only once the transcript says more of the ticket.
+  const mentionCount = texts.reduce((n, t) => n + t.split(ticket.id).length - 1, 0)
+  if (mentionCount <= (ticket.mentionCount ?? 0)) return
+  // Tool results first: where a skill read the ticket.
+  const mentions = ticketMentions([...results, ...messages.map(m => m.text)], ticket.id)
   if (mentions === '') return
   const reply = await ask($, 'the ticket title', TICKET_TITLE_SYSTEM, `チケット ID: ${ticket.id}\n\n抜粋:\n${mentions}`, 120)
   const title = reply === null ? null : titleLine(reply)
   const next: Ticket =
-    title === null ? { ...ticket, titleTries: (ticket.titleTries ?? 0) + 1 } : { id: ticket.id, title, source: 'transcript' }
+    title === null
+      ? { ...ticket, titleTries: (ticket.titleTries ?? 0) + 1, mentionCount }
+      : { id: ticket.id, title, source: 'transcript' }
   await $.state.set(TICKET, next, { ifVersion: held.version })
 }
 
@@ -609,10 +628,23 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => next(e))
 
+  // A skill working on a ticket reads it with a tool; its result may hold the
+  // title. Looked for (with no model) as each tool call of the session ends,
+  // at most every TOOL_SEARCH_GAP_MS.
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+    const now = Date.now()
+    if (e.agentId === undefined && now - lastToolSearch >= TOOL_SEARCH_GAP_MS) {
+      lastToolSearch = now
+      later($, 'tool.call', () => findTicketTitle($, false))
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     // A subagent's turn is not the session's.
-    if (e.agentId === undefined) later($, 'turn.complete', () => findTicketTitle($))
+    if (e.agentId === undefined) later($, 'turn.complete', () => findTicketTitle($, true))
     return result
   }).catch(($, e, next) => next(e))
 
