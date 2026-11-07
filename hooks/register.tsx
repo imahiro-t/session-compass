@@ -508,11 +508,50 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
 async function runText($: Dollar, argv: readonly string[]): Promise<string | null> {
   try {
     const run = await $.process.run(argv, { timeoutMs: 10_000 })
-    return run.exitCode === 0 ? run.stdout : null
+    if (run.exitCode === 0) return run.stdout
+    debug($, `${argv[0]} exited ${run.exitCode}: ${run.stderr.trim().slice(0, 300)}`)
+    return null
   } catch (error) {
     debug($, `could not run ${argv[0]}: ${String(error)}`)
     return null
   }
+}
+
+/** A transcript file of the session, with what picks it. */
+type TranscriptFile = { path: string; size: number; mtimeMs: number }
+
+/**
+ * The session's transcript files. Claude Code keeps one per working folder
+ * the session ran in, and the path its hooks name follows the folder the
+ * session was started from, which may hold none (a resume started from
+ * another folder). So beside that path, every folder under the projects
+ * folder is looked in for a file of the same name.
+ */
+async function transcriptFiles($: Dollar): Promise<TranscriptFile[]> {
+  if (transcriptPath === null) return []
+  const cut = transcriptPath.lastIndexOf('/')
+  const name = transcriptPath.slice(cut + 1)
+  const projects = transcriptPath.slice(0, transcriptPath.slice(0, cut).lastIndexOf('/'))
+  const paths = new Set<string>([transcriptPath])
+  try {
+    for (const entry of await $.fs.list(projects)) {
+      if (entry.kind === 'dir') paths.add(`${projects}/${entry.name}/${name}`)
+    }
+  } catch (error) {
+    debug($, `could not list ${projects}: ${String(error)}`)
+  }
+  const files: TranscriptFile[] = []
+  for (const path of paths) {
+    try {
+      if (!(await $.fs.exists(path))) continue
+      const stat = await $.fs.stat(path)
+      files.push({ path, size: stat.size, mtimeMs: stat.mtimeMs })
+    } catch {
+      // Gone meanwhile, or not readable: not one to read.
+    }
+  }
+  if (files.length === 0) debug($, `no transcript file named ${name} under ${projects}`)
+  return files
 }
 
 /**
@@ -521,9 +560,13 @@ async function runText($: Dollar, argv: readonly string[]): Promise<string | nul
  * where the file cannot be read or the scroll did not land.
  */
 async function toFirstOfFile($: Dollar, surface: string, nav: Nav): Promise<boolean> {
-  if (transcriptPath === null) return false
-  const head = await runText($, ['head', '-c', String(HEAD_BYTES), transcriptPath])
-  const first = head === null ? null : firstPromptRow(parseRows(head))
+  // The largest file holds the session from its start.
+  let first: { id: string; text: string } | null = null
+  for (const file of (await transcriptFiles($)).sort((a, b) => b.size - a.size)) {
+    const head = await runText($, ['head', '-c', String(HEAD_BYTES), file.path])
+    first = head === null ? null : firstPromptRow(parseRows(head))
+    if (first !== null) break
+  }
   if (first === null) return false
   const viewport = viewOn(surface)
   const before = copyViewport(viewport)
@@ -553,9 +596,13 @@ async function toFirstOfFile($: Dollar, surface: string, nav: Nav): Promise<bool
  * did not land.
  */
 async function toEndOfFile($: Dollar, surface: string, nav: Nav): Promise<boolean> {
-  if (transcriptPath === null) return false
-  const tail = await runText($, ['tail', '-n', String(TAIL_LINES), transcriptPath])
-  const last = tail === null ? null : lastDrawnRowId(parseRows(tail))
+  // The file written last holds the session's newest rows.
+  let last: string | null = null
+  for (const file of (await transcriptFiles($)).sort((a, b) => b.mtimeMs - a.mtimeMs)) {
+    const tail = await runText($, ['tail', '-n', String(TAIL_LINES), file.path])
+    last = tail === null ? null : lastDrawnRowId(parseRows(tail))
+    if (last !== null) break
+  }
   if (last === null) return false
   const viewport = viewOn(surface)
   const before = copyViewport(viewport)
