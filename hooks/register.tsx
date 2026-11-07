@@ -37,7 +37,7 @@ import {
   withoutBadStops,
   rowIdOf,
   firstPromptRow,
-  lastDrawnRowId,
+  drawnRowIds,
   parseRows,
 } from './logic'
 import type { NavKind, Viewport } from './logic'
@@ -97,6 +97,8 @@ const QUESTION_COLUMNS = 39
 const HEAD_BYTES = 2_000_000
 /** Lines of the transcript file's tail ⏬ reads for the last row. */
 const TAIL_LINES = 200
+/** The newest rows ⏬ tries at most, newest first, until one is drawn here. */
+const END_TRIES = 30
 
 // The session's transcript file, as Claude Code's hooks name it; null until
 // one has. It moves with a resume or a /clear, so each one sets it again.
@@ -596,24 +598,37 @@ async function toFirstOfFile($: Dollar, surface: string, nav: Nav): Promise<bool
  * did not land.
  */
 async function toEndOfFile($: Dollar, surface: string, nav: Nav): Promise<boolean> {
-  // The file written last holds the session's newest rows.
-  let last: string | null = null
+  // The newest rows, newest file first: the file written last holds the
+  // session's newest rows, though not all of them may be drawn here.
+  const candidates: string[] = []
   for (const file of (await transcriptFiles($)).sort((a, b) => b.mtimeMs - a.mtimeMs)) {
+    if (candidates.length >= END_TRIES) break
     const tail = await runText($, ['tail', '-n', String(TAIL_LINES), file.path])
-    last = tail === null ? null : lastDrawnRowId(parseRows(tail))
-    if (last !== null) break
+    if (tail === null) continue
+    for (const id of drawnRowIds(parseRows(tail), END_TRIES)) {
+      if (!candidates.includes(id)) candidates.push(id)
+    }
   }
-  if (last === null) return false
+  if (candidates.length === 0) return false
   const viewport = viewOn(surface)
   const before = copyViewport(viewport)
   noteMove(viewport, nav.promptIds, nav.promptIds.length, Date.now())
-  const denied = await scrollTo($, last, 'end')
-  if (denied !== undefined) {
+  let last: string | null = null
+  let skipped = 0
+  for (const id of candidates.slice(0, END_TRIES)) {
+    const denied = await scrollTo($, id, 'end')
+    if (denied === undefined) {
+      last = id
+      break
+    }
+    skipped += 1
+  }
+  if (last === null) {
     viewBySurface.set(surface, before)
-    debug($, `could not scroll to the end of ${last}, the transcript's last row: ${denied}`)
+    debug($, `could not scroll to the end of any of the transcript's last ${skipped} rows`)
     return false
   }
-  debug($, `latest lands on the end of ${last}, the transcript's last row`)
+  debug($, `latest lands on the end of ${last}, the transcript's last row${skipped > 0 ? ` drawn here (${skipped} newer not drawn)` : ''}`)
   await writeNav($, 'cursor', current => (current.cursorId === null ? null : { ...current, cursorId: null }))
   return true
 }

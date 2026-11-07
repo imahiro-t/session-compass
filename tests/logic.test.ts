@@ -6,6 +6,7 @@ import {
   PENDING_NOTE,
   bandText,
   commandLine,
+  drawnRowIds,
   firstPromptRow,
   lastDrawnRowId,
   parseRows,
@@ -570,6 +571,12 @@ describe('the transcript file', () => {
     const ending = [...lines.slice(0, 7)].map(l => JSON.stringify(l)).join('\n')
     expect(lastDrawnRowId(parseRows(ending))).toBe('a1')
     expect(lastDrawnRowId([])).toBe(null)
+  })
+
+  test('the newest drawn rows come newest first, each once, to the limit', () => {
+    // A notification row is drawn too; meta and subagent rows are not.
+    expect(drawnRowIds(parseRows(text), 10)).toEqual(['toolu_9', 'a1', 'p2', 'c1', 'n1'])
+    expect(drawnRowIds(parseRows(text), 2)).toEqual(['toolu_9', 'a1'])
   })
 })
 

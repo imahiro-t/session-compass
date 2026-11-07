@@ -232,23 +232,38 @@ export function firstPromptRow(rows: readonly TranscriptRow[]): { id: string; te
  * drawn under. A reply's thinking draws no row of its own and is passed over.
  */
 export function lastDrawnRowId(rows: readonly TranscriptRow[]): string | null {
-  for (let i = rows.length - 1; i >= 0; i--) {
+  return drawnRowIds(rows, 1)[0] ?? null
+}
+
+/**
+ * The ids of the rows drawn lowest in the transcript, newest first, each
+ * once, at most `limit`: what ⏬ tries in turn, since the file may hold rows
+ * this process never drew (another process appending to the same session).
+ */
+export function drawnRowIds(rows: readonly TranscriptRow[], limit: number): string[] {
+  const out: string[] = []
+  const add = (id: string) => {
+    if (!out.includes(id)) out.push(id)
+  }
+  for (let i = rows.length - 1; i >= 0 && out.length < limit; i--) {
     const row = rows[i]!
     if ((row.type !== 'assistant' && row.type !== 'user') || !isMainRow(row)) continue
     const content = row.message?.content
     if (typeof content === 'string') {
-      if (content.trim() !== '') return row.uuid
+      if (content.trim() !== '') add(row.uuid)
       continue
     }
     if (!Array.isArray(content)) continue
     for (let j = content.length - 1; j >= 0; j--) {
       const block = content[j] as { type?: unknown; id?: unknown; tool_use_id?: unknown; text?: unknown } | null
-      if (block?.type === 'tool_use' && typeof block.id === 'string') return block.id
-      if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') return block.tool_use_id
-      if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '') return row.uuid
+      if (block?.type === 'tool_use' && typeof block.id === 'string') add(block.id)
+      else if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') add(block.tool_use_id)
+      else if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '') add(row.uuid)
+      else continue
+      break
     }
   }
-  return null
+  return out.slice(0, limit)
 }
 
 /**
