@@ -1,7 +1,22 @@
 {
   "name": "session-compass",
   "version": "0.1.0",
-  "description": "Session Compass: a band above the Claude Code prompt that shows a summary of the session and buttons to step back and forth through the conversation",
-  "author": { "name": "Takashi Imahiro" },
-  "license": "MIT"
+  "description": "Session Compass: a band above the Claude Code prompt that tells what the session is about (a one-line summary of your prompts so far, made again after each prompt or on 🔁, or the ticket the session works on, by its ID and title) and has buttons to step back and forth through your prompts; the summary shows above Claude's question dialog too",
+  "author": {
+    "name": "Takashi Imahiro"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "summaryMode": {
+      "type": "string",
+      "title": "Summary mode",
+      "description": "auto: remake the band's summary after each prompt. manual: make it once, then only when 🔁 on the band is pressed.",
+      "options": [
+        "auto",
+        "manual"
+      ],
+      "default": "auto"
+    }
+  }
 }
