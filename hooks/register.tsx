@@ -138,6 +138,15 @@ const viewBySurface = new Map<string, Viewport>()
 // where ⏬ goes. A reload empties it; the next row appended starts it again.
 const newestRows: string[] = []
 
+// The turns' closing lines drawn so far, and the newest one drawn first in
+// this process (live: the latest turn's).
+const turnLines = new Set<string>()
+let newestTurnLine: string | null = null
+
+function noteNewestTurnLine(id: string): void {
+  newestTurnLine = id
+}
+
 function noteNewestRow(id: string): void {
   const at = newestRows.indexOf(id)
   if (at !== -1) newestRows.splice(at, 1)
@@ -609,6 +618,11 @@ async function toEndOfFile($: Dollar, surface: string, nav: Nav): Promise<boolea
       if (!candidates.includes(id)) candidates.push(id)
     }
   }
+  // The closing line of the latest turn as drawn here: tried next to the
+  // file's newest row, in case the file's id for that line is not its row's.
+  if (newestTurnLine !== null && !candidates.includes(newestTurnLine)) {
+    candidates.splice(Math.min(1, candidates.length), 0, newestTurnLine)
+  }
   if (candidates.length === 0) return false
   const viewport = viewOn(surface)
   const before = copyViewport(viewport)
@@ -828,6 +842,17 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
     if ('onScreen' in e.props && e.props.onScreen !== undefined) {
       noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, false, Date.now())
+    }
+    return next(e)
+  })
+
+  // The line closing a turn is one row high: ⏬ can put its end on the
+  // viewport's bottom. The first time a line is drawn, its id is the newest.
+  on('ui.render', { component: 'TurnDuration' }, ($, e, next) => {
+    if (!turnLines.has(e.requestId)) {
+      turnLines.add(e.requestId)
+      noteNewestTurnLine(e.requestId)
+      debug($, `a turn's closing line is drawn under ${e.requestId}`)
     }
     return next(e)
   })

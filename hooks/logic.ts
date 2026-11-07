@@ -247,6 +247,13 @@ export function drawnRowIds(rows: readonly TranscriptRow[], limit: number): stri
   }
   for (let i = rows.length - 1; i >= 0 && out.length < limit; i--) {
     const row = rows[i]!
+    // The line closing a turn (`Baked for 3s`): one row high, so its end can
+    // be put on the viewport's bottom where a reply taller than the window
+    // only ever shows its top.
+    if (row.type === 'system' && (row as { subtype?: unknown }).subtype === 'turn_duration' && isMainRow(row)) {
+      add(row.uuid)
+      continue
+    }
     if ((row.type !== 'assistant' && row.type !== 'user') || !isMainRow(row)) continue
     const content = row.message?.content
     if (typeof content === 'string') {

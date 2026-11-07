@@ -578,6 +578,11 @@ describe('the transcript file', () => {
     expect(drawnRowIds(parseRows(text), 10)).toEqual(['toolu_9', 'a1', 'p2', 'c1', 'n1'])
     expect(drawnRowIds(parseRows(text), 2)).toEqual(['toolu_9', 'a1'])
   })
+
+  test('a turn\'s closing line comes first: one row high, its end reaches the bottom', () => {
+    const ended = `${text}\n${JSON.stringify({ type: 'system', subtype: 'turn_duration', uuid: 'd1', durationMs: 3000 })}\n${JSON.stringify({ type: 'last-prompt' })}`
+    expect(drawnRowIds(parseRows(ended), 3)).toEqual(['d1', 'toolu_9', 'a1'])
+  })
 })
 
 describe('a ticket\'s title in a tool result', () => {
