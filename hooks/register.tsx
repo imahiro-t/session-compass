@@ -45,7 +45,7 @@ const summaryAtom = atom(SUMMARY, { status: 'idle' })
 const navAtom = atom(NAV, EMPTY_NAV)
 
 const SUMMARY_SYSTEM =
-  'あなたはセッションの要約を書く。番号順に並んだユーザーの依頼（1 番がセッション最初の依頼、以降は新しいもの）から、このセッションで今取り組んでいることを 1 行（全角 40 字程度）で要約する。話題が移っていれば新しい話題を中心に、全体の流れが分かるように書く。前置き・引用符・句点以外の記号は不要で、要約だけを出力する。'
+  'あなたはセッションの要約を書く。番号順に並んだユーザーの依頼（1 番がセッション最初の依頼、以降は新しいもの）から、このセッションで今取り組んでいることを 1 行（全角 40 字程度）で要約する。話題が移っていれば新しい話題を中心に、全体の流れが分かるように書く。「これまでの要約」が添えられていれば、番号の飛んだ間の依頼も含めた流れの手がかりにするが、新しい依頼で話題が変わっていればそれに引きずられず書き直す。前置き・引用符・句点以外の記号は不要で、要約だけを出力する。'
 
 /** The buttons, left to right. */
 const BUTTONS: readonly { kind: NavKind; label: string }[] = [
@@ -260,7 +260,7 @@ async function runSummary($: Dollar, prompts: readonly string[], previous: strin
     const reply = await $.model.complete({
       model: 'haiku',
       system: SUMMARY_SYSTEM,
-      prompt: summaryPrompts(prompts),
+      prompt: summaryPrompts(prompts, previous),
       maxTokens: 200,
       effort: 'low',
       timeoutMs: 60_000,

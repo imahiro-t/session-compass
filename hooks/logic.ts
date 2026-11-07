@@ -726,11 +726,21 @@ export function lastSummaryText(summary: Summary | null | undefined): string | u
   return summary !== null && summary !== undefined && 'text' in summary ? summary.text : undefined
 }
 
+/** The last summary sent with a new request is cut to this many code points. */
+export const PREVIOUS_SUMMARY_LIMIT = 200
+
 /**
  * What the summary is asked: the session's first prompt and the newest few,
- * numbered in the order said.
+ * numbered in the order said, after the last summary made when there is one
+ * (it carries what the prompts left out in the middle).
  */
-export function summaryPrompts(prompts: readonly string[]): string {
+export function summaryPrompts(prompts: readonly string[], previous?: string): string {
+  const list = numberedPrompts(prompts)
+  const last = previous?.replace(/\s+/g, ' ').trim() ?? ''
+  return last === '' ? list : `これまでの要約: ${cut(last, PREVIOUS_SUMMARY_LIMIT)}\n\n依頼:\n${list}`
+}
+
+function numberedPrompts(prompts: readonly string[]): string {
   const recent = prompts.length <= SUMMARY_RECENT + 1 ? prompts : [prompts[0]!, ...prompts.slice(-SUMMARY_RECENT)]
   const skipped = prompts.length - recent.length
   return recent

@@ -378,6 +378,13 @@ describe('the prompts the summary is made from', () => {
     expect(summaryPrompts(many).split('\n')).toEqual(['1. p1', '5. p5', '6. p6', '7. p7', '8. p8', '9. p9', '10. p10', '11. p11', '12. p12'])
   })
 
+  test('the last summary made goes before the prompts, on one line and cut', () => {
+    expect(summaryPrompts(['a', 'b'], ' 前の\n要約 ')).toBe('これまでの要約: 前の 要約\n\n依頼:\n1. a\n2. b')
+    expect(summaryPrompts(['a'], '  ')).toBe('1. a')
+    const long = summaryPrompts(['a'], 'x'.repeat(300))
+    expect(long.startsWith(`これまでの要約: ${'x'.repeat(200)}…\n`)).toBe(true)
+  })
+
   test('a summary stored before the basis existed counts as one prompt', () => {
     expect(summaryBasis({ status: 'idle' })).toBe(0)
     expect(summaryBasis({ status: 'done', text: 't' })).toBe(1)

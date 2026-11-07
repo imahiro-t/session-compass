@@ -8,7 +8,7 @@ A Claude Code plugin that adds a band above the prompt. Its left side tells you 
 
 ### The summary
 
-- After each of your prompts, the summary is made again from your first prompt and your newest ones (up to eight), so it moves with the topic as the session goes on. A model call (haiku) writes it.
+- After each of your prompts, the summary is made again from your first prompt and your newest ones (up to eight), with the last summary made carrying what came between, so it moves with the topic as the session goes on. A model call (haiku) writes it.
 - While a new summary is being made, and if one fails, the last one stays on the band.
 - Slash commands count as prompts when they carry arguments (`/graph-ops:process-ticket SCMP-00001`, say); ones with none (`/clear`, `/config`) do not.
 - In `manual` mode (see [`summaryMode`](#summarymode)) the first summary is still made by itself; after that it is made again only when you press 🔁 on the band.
@@ -26,7 +26,7 @@ The question dialog takes the prompt's place, and the band with it. The summary 
 
 ### What is sent, and when
 
-- The summary sends your first prompt and your newest prompts (each cut to 600 characters) to haiku after each prompt (`auto`) or on 🔁 (`manual`).
+- The summary sends your first prompt and your newest prompts (each cut to 600 characters), with the last summary made (cut to 200), to haiku after each prompt (`auto`) or on 🔁 (`manual`).
 - ⏫ and ⏬ read the session's transcript file under `~/.claude/projects/` on your machine (its first 2 MB, or its last 200 lines, with `head` and `tail`). Nothing of it is sent anywhere.
 
 ## Install

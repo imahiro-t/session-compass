@@ -125,8 +125,8 @@ test('the summary is made again each time the person says more', async ($, on) =
 
   expect(calls.complete).toEqual([
     '1. ログイン画面でエラーになるバグを直してほしい',
-    '1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して',
-    '1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して\n3. ありがとう',
+    'これまでの要約: ログインバグの修正\n\n依頼:\n1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して',
+    'これまでの要約: ログインバグの修正\n\n依頼:\n1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して\n3. ありがとう',
   ])
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /ログインバグの修正/ }))).toBeDefined()
@@ -703,7 +703,7 @@ test('in manual mode the first summary is made unasked, later ones on 🔁', { o
   expect(await ui.find({ key: 'refresh' })).toBeDefined()
   await ui.press({ key: 'refresh' })
   await clock.settle()
-  expect(calls.complete).toEqual(['1. one', '1. one\n2. two'])
+  expect(calls.complete).toEqual(['1. one', 'これまでの要約: ログインバグの修正\n\n依頼:\n1. one\n2. two'])
   // 🔁 remakes it even with nothing new said.
   await ui.press({ key: 'refresh' })
   await clock.settle()
