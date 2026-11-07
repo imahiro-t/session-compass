@@ -12,10 +12,8 @@ import {
   parseRows,
   rowIdOf,
   typedText,
-  graphTicketTitle,
   isOwnPrompt,
   isStopId,
-  isYes,
   navPosition,
   navTarget,
   oneLine,
@@ -25,11 +23,6 @@ import {
   PROMPTS_KEPT,
   summaryBasis,
   summaryPrompts,
-  ticketBand,
-  ticketCandidates,
-  ticketMentions,
-  structuredTitle,
-  titleLine,
   summaryInput,
   summaryLine,
   textWidth,
@@ -364,44 +357,6 @@ describe('summary text', () => {
   })
 })
 
-describe('ticket ids', () => {
-  test('graph-ops and Jira ids are found in order, each once', () => {
-    expect(ticketCandidates('/graph-ops:process-ticket SCMP-00001')).toEqual(['SCMP-00001'])
-    expect(ticketCandidates('PROJ-123 と AB2-7、もう一度 PROJ-123')).toEqual(['PROJ-123', 'AB2-7'])
-  })
-
-  test('standards, versions and lower-case words are not tickets', () => {
-    expect(ticketCandidates('UTF-8 で RFC-2119 に従う、sha-256、A-1、my-PROJ-1x')).toEqual([])
-  })
-
-  test('the title graph-engine prints is read for that ticket only', () => {
-    const out = JSON.stringify({ id: 'SCMP-00001', title: ' 帯を\n実装する ' })
-    expect(graphTicketTitle(out, 'SCMP-00001')).toBe('帯を 実装する')
-    expect(graphTicketTitle(out, 'SCMP-00002')).toBe(null)
-    expect(graphTicketTitle('not json', 'SCMP-00001')).toBe(null)
-  })
-
-  test('replies of the model', () => {
-    expect(isYes('yes')).toBe(true)
-    expect(isYes('Yes.')).toBe(true)
-    expect(isYes('no')).toBe(false)
-    expect(titleLine('「ログイン画面のバグ」')).toBe('ログイン画面のバグ')
-    expect(titleLine('NONE')).toBe(null)
-  })
-
-  test('the mentions of a ticket are cut around each occurrence', () => {
-    const text = `${'x'.repeat(1000)} PROJ-1 title here ${'y'.repeat(1000)}`
-    const found = ticketMentions([text, 'nothing'], 'PROJ-1', 6000, 10)
-    expect(found).toBe('x'.repeat(9) + ' PROJ-1 title her')
-    expect(ticketMentions(['nothing'], 'PROJ-1')).toBe('')
-  })
-
-  test('the band shows the id, and the title when known, cut to fit', () => {
-    expect(ticketBand({ id: 'PROJ-1', title: null, source: 'prompt' }, 40)).toEqual({ id: 'PROJ-1', title: '' })
-    expect(ticketBand({ id: 'PROJ-1', title: 'abcdefghij', source: 'transcript' }, 12)).toEqual({ id: 'PROJ-1', title: 'abcd…' })
-  })
-})
-
 describe('the prompts the summary is made from', () => {
   test('a slash command is kept as typed, on one line', () => {
     expect(promptLine('ignored', { name: 'graph-ops:process-ticket', args: 'SCMP-1' })).toBe('/graph-ops:process-ticket SCMP-1')
@@ -421,6 +376,13 @@ describe('the prompts the summary is made from', () => {
     expect(summaryPrompts(['a', 'b'])).toBe('1. a\n2. b')
     const many = Array.from({ length: 12 }, (_, i) => `p${i + 1}`)
     expect(summaryPrompts(many).split('\n')).toEqual(['1. p1', '5. p5', '6. p6', '7. p7', '8. p8', '9. p9', '10. p10', '11. p11', '12. p12'])
+  })
+
+  test('the last summary made goes before the prompts, on one line and cut', () => {
+    expect(summaryPrompts(['a', 'b'], ' 前の\n要約 ')).toBe('これまでの要約: 前の 要約\n\n依頼:\n1. a\n2. b')
+    expect(summaryPrompts(['a'], '  ')).toBe('1. a')
+    const long = summaryPrompts(['a'], 'x'.repeat(300))
+    expect(long.startsWith(`これまでの要約: ${'x'.repeat(200)}…\n`)).toBe(true)
   })
 
   test('a summary stored before the basis existed counts as one prompt', () => {
@@ -582,38 +544,5 @@ describe('the transcript file', () => {
   test('a turn\'s closing line comes first: one row high, its end reaches the bottom', () => {
     const ended = `${text}\n${JSON.stringify({ type: 'system', subtype: 'turn_duration', uuid: 'd1', durationMs: 3000 })}\n${JSON.stringify({ type: 'last-prompt' })}`
     expect(drawnRowIds(parseRows(ended), 3)).toEqual(['d1', 'toolu_9', 'a1'])
-  })
-})
-
-describe('a ticket\'s title in a tool result', () => {
-  test('graph-ops get-ticket, pretty-printed, its children not taken for it', () => {
-    const out = JSON.stringify(
-      {
-        id: 'SCMP-00001',
-        project_id: 'proj-1',
-        title: 'プロンプト上部に帯を実装する',
-        children: [{ id: 'SCMP-00002', title: 'ログの誤りを直す' }],
-      },
-      null,
-      2,
-    )
-    expect(structuredTitle(['ran it', out], 'SCMP-00001')).toBe('プロンプト上部に帯を実装する')
-    expect(structuredTitle([out], 'SCMP-00002')).toBe('ログの誤りを直す')
-  })
-
-  test('a record cut short still gives its title', () => {
-    expect(structuredTitle(['{\n  "id": "SCMP-00001",\n  "title": "帯を実装する",\n  "description": "セッ'], 'SCMP-00001')).toBe('帯を実装する')
-  })
-
-  test('Jira: the key, then fields.summary, before the issue type\'s name', () => {
-    const issue = '{"key":"PROJ-123","fields":{"summary":"Login fails with \\"bad token\\"","issuetype":{"id":"1","name":"Bug"}}}'
-    expect(structuredTitle([issue], 'PROJ-123')).toBe('Login fails with "bad token"')
-  })
-
-  test('the newest record wins; a mention with no record gives none', () => {
-    const old = '{"id":"PROJ-1","title":"old title"}'
-    const renamed = '{"id":"PROJ-1","title":"new title"}'
-    expect(structuredTitle([old, 'talking about PROJ-1', renamed], 'PROJ-1')).toBe('new title')
-    expect(structuredTitle(['PROJ-1 is broken', '{"id":"PROJ-2","title":"other"}'], 'PROJ-1')).toBe(null)
   })
 })

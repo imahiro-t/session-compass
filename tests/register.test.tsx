@@ -125,8 +125,8 @@ test('the summary is made again each time the person says more', async ($, on) =
 
   expect(calls.complete).toEqual([
     '1. ログイン画面でエラーになるバグを直してほしい',
-    '1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して',
-    '1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して\n3. ありがとう',
+    'これまでの要約: ログインバグの修正\n\n依頼:\n1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して',
+    'これまでの要約: ログインバグの修正\n\n依頼:\n1. ログイン画面でエラーになるバグを直してほしい\n2. 次はテストを追加して\n3. ありがとう',
   ])
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /ログインバグの修正/ }))).toBeDefined()
@@ -563,69 +563,21 @@ test('after scrolling by hand, the buttons step from the prompt on screen', asyn
   await ui.unmount()
 })
 
-/** The model's replies in the ticket tests, by what it is asked. */
-function ticketAnswers(work: 'yes' | 'no', title = 'NONE') {
-  return (system: string) =>
-    system.includes('yes') ? work : system.includes('タイトル') ? title : undefined
-}
-
-test('a skill run on a graph-ops ticket shows the ticket and its title, not a summary', async ($, on) => {
-  const { clock, calls } = engine(on)
+test('a ticket the prompt names is summarized like any prompt', async ($, on) => {
+  const { clock, calls } = engine(on, { isAnswered: true, text: 'SCMP-00001 の処理' })
   const runs: string[][] = []
   on('process.run', (_, e) => {
     runs.push([...e.argv])
-    return { value: { exitCode: 0, stdout: JSON.stringify({ id: 'SCMP-00001', title: '帯を実装する' }), stderr: '' } } as never
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
   })
   await start($)
   const command = { name: 'graph-ops:process-ticket', args: 'SCMP-00001' }
   await $.prompt.submit({ text: '/graph-ops:process-ticket SCMP-00001', origin: COMPOSER, wait: false, command })
   await clock.settle()
-
-  expect(runs).toEqual([['graph-engine', 'get-ticket', 'SCMP-00001']])
-  // A command naming the id asks to work on it: no model call to judge it, and no summary.
-  expect(calls.complete).toEqual([])
+  expect(runs).toEqual([])
+  expect(calls.complete).toEqual(['1. /graph-ops:process-ticket SCMP-00001'])
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: / 帯を実装する/ })).toBeDefined()
-  await ui.unmount()
-
-  // Later prompts leave the ticket in place and make no summary.
-  await say($, 'u2', 'テストも追加して')
-  await clock.settle()
-  expect(calls.complete).toEqual([])
-})
-
-test('a ticket only mentioned is no ticket of the session: the summary goes on', async ($, on) => {
-  const { clock, calls } = engine(on, { isAnswered: true, text: '仕様の確認' }, { answer: ticketAnswers('no') })
-  await start($)
-  await say($, 'u1', 'PROJ-12 の仕様ってどうなってたっけ')
-  await clock.settle()
-  expect(calls.complete).toEqual(['チケット ID: PROJ-12\n\n依頼:\nPROJ-12 の仕様ってどうなってたっけ', '1. PROJ-12 の仕様ってどうなってたっけ'])
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /仕様の確認/ })).toBeDefined()
-  await ui.unmount()
-})
-
-test('a ticket graph-ops does not know shows its id, then its title once the transcript has it', async ($, on) => {
-  const { clock, transcript } = engine(on, undefined, { answer: ticketAnswers('yes', 'ログイン画面のバグ') })
-  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: 'TICKET_NOT_FOUND' } }) as never)
-  on('turn.complete', () => ({ text: '' }))
-  await start($)
-  await say($, 'u1', 'Jira の PROJ-123 を対応して')
-  await clock.settle()
-
-  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: 'PROJ-123' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /ログイン画面のバグ/ })).toBeUndefined()
-  await ui.unmount()
-
-  // A skill read the ticket; the turn ends.
-  transcript.push({ role: 'user', text: 'Jira の PROJ-123 を対応して', toolUses: [] })
-  transcript.push({ role: 'assistant', text: 'PROJ-123「ログイン画面のバグ」を確認します', toolUses: [] })
-  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answered' } as never)
-  await clock.settle()
-  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: / ログイン画面のバグ/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SCMP-00001 の処理/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -726,23 +678,14 @@ test('the summary shows above the question dialog, cut to one row', async ($, on
   await ui.unmount()
 })
 
-test('a ticket shows above the question dialog; with nothing to show the dialog is the engine\'s alone', async ($, on) => {
+test('with nothing to show, the question dialog is the engine\'s alone', async ($, on) => {
   const { clock } = engine(on)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify({ id: 'SCMP-00001', title: '帯' }), stderr: '' } }) as never)
   questionEngine(on)
   await start($)
   await clock.settle()
-  let ui = await drawQuestion($)
+  const ui = await drawQuestion($)
   expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /まだプロンプト/ })).toBeUndefined()
-  await ui.unmount()
-
-  const command = { name: 'graph-ops:process-ticket', args: 'SCMP-00001' }
-  await $.prompt.submit({ text: '/graph-ops:process-ticket SCMP-00001', origin: COMPOSER, wait: false, command })
-  await clock.settle()
-  ui = await drawQuestion($)
-  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: / 帯/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -760,7 +703,7 @@ test('in manual mode the first summary is made unasked, later ones on 🔁', { o
   expect(await ui.find({ key: 'refresh' })).toBeDefined()
   await ui.press({ key: 'refresh' })
   await clock.settle()
-  expect(calls.complete).toEqual(['1. one', '1. one\n2. two'])
+  expect(calls.complete).toEqual(['1. one', 'これまでの要約: ログインバグの修正\n\n依頼:\n1. one\n2. two'])
   // 🔁 remakes it even with nothing new said.
   await ui.press({ key: 'refresh' })
   await clock.settle()
@@ -774,19 +717,6 @@ test('in auto mode there is no 🔁', async ($, on) => {
   await say($, 'u1', 'one')
   await clock.settle()
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ key: 'refresh' })).toBeUndefined()
-  await ui.unmount()
-})
-
-test('a session on a ticket has no 🔁, even in manual mode', { options: { summaryMode: 'manual' } }, async ($, on) => {
-  const { clock } = engine(on)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify({ id: 'SCMP-00001', title: '帯' }), stderr: '' } }) as never)
-  await start($)
-  const command = { name: 'graph-ops:process-ticket', args: 'SCMP-00001' }
-  await $.prompt.submit({ text: '/graph-ops:process-ticket SCMP-00001', origin: COMPOSER, wait: false, command })
-  await clock.settle()
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
   expect(await ui.find({ key: 'refresh' })).toBeUndefined()
   await ui.unmount()
 })
@@ -857,35 +787,4 @@ test('⏬ goes to the end of the newest row, its last tool call\'s for a reply, 
   expect(tried).toEqual(['toolu_2', 'u1'])
   expect(calls.scroll).toEqual(['u1'])
   await ui.unmount()
-})
-
-test('a skill that reads the ticket gives its title from the tool result, with no model call', async ($, on) => {
-  const { clock, calls, transcript } = engine(on, undefined, { answer: ticketAnswers('yes', 'NONE') })
-  // graph-engine is not on this process's PATH.
-  on('process.run', () => {
-    throw new Error('spawn graph-engine ENOENT')
-  })
-  on('turn.complete', () => ({ text: '' }))
-  await start($)
-  const command = { name: 'graph-ops:autopilot-tree', args: 'SCMP-00001 --run r1' }
-  await $.prompt.submit({ text: '/graph-ops:autopilot-tree SCMP-00001 --run r1', origin: COMPOSER, wait: false, command })
-  await clock.settle()
-  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
-  await ui.unmount()
-
-  // The skill read the ticket with a tool; its record holds the title.
-  transcript.push({
-    role: 'user',
-    text: '',
-    toolUses: [],
-    toolResults: [{ tool_use_id: 't1', text: '{\n  "id": "SCMP-00001",\n  "title": "帯を実装する"\n}', isError: false }],
-  } as never)
-  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answered' } as never)
-  await clock.settle()
-  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: / 帯を実装する/ })).toBeDefined()
-  await ui.unmount()
-  // No model call looked for the title.
-  expect(calls.complete.filter(p => p.includes('抜粋'))).toEqual([])
 })

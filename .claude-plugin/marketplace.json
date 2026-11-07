@@ -8,7 +8,7 @@
     {
       "name": "session-compass",
       "source": "./",
-      "description": "A band above the prompt with what the session is about (a summary of your prompts, or the ticket it works on) and buttons to step through your prompts"
+      "description": "A band above the prompt with what the session is about (a summary of your prompts) and buttons to step through your prompts"
     }
   ]
 }
