@@ -206,20 +206,29 @@ async function keepPrompt($: Dollar, line: string): Promise<string[] | null> {
   return null
 }
 
+/** How the summary is kept: `auto` after each prompt, `manual` on 🔁 (userConfig `summaryMode`). */
+type SummaryMode = 'auto' | 'manual'
+let summaryMode: SummaryMode = 'auto'
+
 /**
- * Makes the summary again when the person has said more since it was made,
- * and nobody is making one now: one at a time, and once it is done it looks
- * again, so a prompt said while it ran is not left out. Called from timers
- * only. Once the session has a ticket, the band shows that instead and no
- * summary is made.
+ * Makes the summary again, one at a time, and nobody is making one now.
+ *
+ * `said` (a prompt, the session's start): in `auto` mode when the person has
+ * said more since it was made, and once it is done it looks again, so a
+ * prompt said while it ran is not left out; in `manual` mode only the first
+ * summary of the session. `asked` (🔁 pressed): whenever there is a prompt.
+ * Once the session has a ticket, the band shows that instead and no summary
+ * is made.
  */
-async function startSummary($: Dollar): Promise<void> {
+async function startSummary($: Dollar, why: 'said' | 'asked'): Promise<void> {
   if ((await $.state.get(TICKET)).value) return
   const prompts = (await $.state.get(PROMPTS)).value ?? []
   const held = await $.state.get(SUMMARY)
   const summary = held.value
   if (summary?.status === 'pending') return
-  if (prompts.length === 0 || prompts.length <= summaryBasis(summary)) return
+  if (prompts.length === 0) return
+  const basis = summaryBasis(summary)
+  if (why === 'said' && (summaryMode === 'manual' ? basis > 0 : prompts.length <= basis)) return
   const text = lastSummaryText(summary)
   const pending: Summary = { status: 'pending', token: envToken, basis: prompts.length, ...(text === undefined ? {} : { text }) }
   const won = await $.state.set(SUMMARY, pending, { ifVersion: held.version })
@@ -267,7 +276,7 @@ async function runSummary($: Dollar, prompts: readonly string[], previous: strin
     return
   }
   // The person may have said more while it ran.
-  if (result.status === 'done') await startSummary($)
+  if (result.status === 'done') await startSummary($, 'said')
 }
 
 /** The title graph-ops holds for the ticket, or null where it has none or cannot be asked. */
@@ -338,7 +347,7 @@ async function findTicketTitle($: Dollar): Promise<void> {
 async function onPrompt($: Dollar, line: string, args: string | undefined): Promise<void> {
   await keepPrompt($, line)
   if (await detectTicket($, line, args)) return
-  await startSummary($)
+  await startSummary($, 'said')
 }
 
 /**
@@ -391,7 +400,7 @@ async function onStart($: Dollar): Promise<void> {
       }
     }
   }
-  if (prompt !== null) await startSummary($)
+  if (prompt !== null) await startSummary($, 'said')
   await mergeBuffer($)
 }
 
@@ -438,7 +447,9 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  summaryMode = options.summaryMode === 'manual' ? 'manual' : 'auto'
+
   on('session.start', ($, e, next) => {
     // The first `session.start` is awaited before the first prompt: nothing
     // slow runs in it. The work goes to a timer.
@@ -564,7 +575,8 @@ export const register: Register = on => {
     const ticket = await read($, ticketAtom)
 
     const { Box, Button, Text } = $.ui.resolve(e)
-    const room = Math.max(8, e.props.bodyColumns - BUTTONS_WIDTH)
+    const canRefresh = summaryMode === 'manual' && !ticket
+    const room = Math.max(8, e.props.bodyColumns - BUTTONS_WIDTH - (canRefresh ? BUTTON_CELLS + BUTTON_GAP : 0))
     const hasPrompts = nav.promptIds.length > 0
 
     let left: JSX.Element
@@ -597,6 +609,14 @@ export const register: Register = on => {
           {left}
         </Box>
         <Box flexDirection="row" flexShrink={0} gap={BUTTON_GAP} marginLeft={BUTTONS_MARGIN}>
+          {canRefresh ? (
+            <Button
+              key="refresh"
+              label="🔁"
+              dimColor={summary.status === 'pending' || !hasPrompts}
+              onPress={() => startSummary($, 'asked').catch(error => debug($, `refresh failed: ${String(error)}`))}
+            />
+          ) : null}
           {BUTTONS.map(b => (
             <Button
               key={b.kind}

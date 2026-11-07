@@ -745,3 +745,48 @@ test('a ticket shows above the question dialog; with nothing to show the dialog 
   expect(await ui.find({ type: 'Text', text: / 帯/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('in manual mode the first summary is made unasked, later ones on 🔁', { options: { summaryMode: 'manual' } }, async ($, on) => {
+  const { clock, calls } = engine(on)
+  await start($)
+  await say($, 'u1', 'one')
+  await clock.settle()
+  await say($, 'u2', 'two')
+  await clock.settle()
+  // The first prompt was summarized; the second waits for 🔁.
+  expect(calls.complete).toEqual(['1. one'])
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'refresh' })).toBeDefined()
+  await ui.press({ key: 'refresh' })
+  await clock.settle()
+  expect(calls.complete).toEqual(['1. one', '1. one\n2. two'])
+  // 🔁 remakes it even with nothing new said.
+  await ui.press({ key: 'refresh' })
+  await clock.settle()
+  expect(calls.complete.length).toBe(3)
+  await ui.unmount()
+})
+
+test('in auto mode there is no 🔁', async ($, on) => {
+  const { clock } = engine(on)
+  await start($)
+  await say($, 'u1', 'one')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'refresh' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a session on a ticket has no 🔁, even in manual mode', { options: { summaryMode: 'manual' } }, async ($, on) => {
+  const { clock } = engine(on)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify({ id: 'SCMP-00001', title: '帯' }), stderr: '' } }) as never)
+  await start($)
+  const command = { name: 'graph-ops:process-ticket', args: 'SCMP-00001' }
+  await $.prompt.submit({ text: '/graph-ops:process-ticket SCMP-00001', origin: COMPOSER, wait: false, command })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'SCMP-00001' })).toBeDefined()
+  expect(await ui.find({ key: 'refresh' })).toBeUndefined()
+  await ui.unmount()
+})
