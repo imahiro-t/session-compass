@@ -1,13 +1,11 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface, Register, SessionMessagesResult } from 'claude-code'
 
-import type { Nav, PastPrompt, Summary, Ticket } from '../types'
+import type { Nav, PastPrompt, Summary } from '../types'
 import {
   EMPTY_NAV,
   bandText,
-  graphTicketTitle,
   isOwnPrompt,
-  isYes,
   lastSummaryText,
   isStopId,
   navPosition,
@@ -18,11 +16,6 @@ import {
   summaryInput,
   summaryLine,
   summaryPrompts,
-  ticketBand,
-  ticketCandidates,
-  ticketMentions,
-  structuredTitle,
-  titleLine,
   unknownPrompts,
   typedText,
   userPromptTexts,
@@ -46,29 +39,13 @@ const FIRST_PROMPT = { plugin: 'session-compass', key: 'firstPrompt' } as const
 const SUMMARY = { plugin: 'session-compass', key: 'summary' } as const
 const NAV = { plugin: 'session-compass', key: 'nav' } as const
 const PROMPTS = { plugin: 'session-compass', key: 'prompts' } as const
-const TICKET = { plugin: 'session-compass', key: 'ticket' } as const
 
 const firstPromptAtom = atom(FIRST_PROMPT, null)
 const summaryAtom = atom(SUMMARY, { status: 'idle' })
 const navAtom = atom(NAV, EMPTY_NAV)
-const ticketAtom = atom(TICKET, null)
 
 const SUMMARY_SYSTEM =
   'あなたはセッションの要約を書く。番号順に並んだユーザーの依頼（1 番がセッション最初の依頼、以降は新しいもの）から、このセッションで今取り組んでいることを 1 行（全角 40 字程度）で要約する。話題が移っていれば新しい話題を中心に、全体の流れが分かるように書く。前置き・引用符・句点以外の記号は不要で、要約だけを出力する。'
-
-const TICKET_WORK_SYSTEM =
-  'ユーザーの依頼が、指定されたチケット（課題管理ツールのチケット）そのものに取り組む・対応する・処理する依頼なら yes、チケットに触れているだけ（質問・参照・比較など）なら no とだけ答える。'
-
-const TICKET_TITLE_SYSTEM =
-  '与えられた抜粋から、指定されたチケット ID のチケットのタイトル（件名・summary）を、書かれているとおりに 1 行で答える。抜粋にタイトルが書かれていなければ NONE とだけ答える。推測はしない。'
-
-/** The executable that answers for graph-ops tickets. */
-const GRAPH_ENGINE = 'graph-engine'
-/** Transcript searches for a ticket's title before giving up. */
-const TITLE_TRIES = 5
-/** The least time between two searches of the transcript after tool calls, in ms. */
-const TOOL_SEARCH_GAP_MS = 2000
-let lastToolSearch = 0
 
 /** The buttons, left to right. */
 const BUTTONS: readonly { kind: NavKind; label: string }[] = [
@@ -231,18 +208,6 @@ async function mergeBuffer($: Dollar): Promise<void> {
   }
 }
 
-/** One model call, its reply as text, or null (said in the debug log). */
-async function ask($: Dollar, what: string, system: string, prompt: string, maxTokens = 200): Promise<string | null> {
-  try {
-    const reply = await $.model.complete({ model: 'haiku', system, prompt, maxTokens, effort: 'low', timeoutMs: 60_000 })
-    if (reply.isAnswered) return reply.text
-    debug($, `${what} got no answer: ${reply.reason}`)
-  } catch (error) {
-    debug($, `${what} failed: ${String(error)}`)
-  }
-  return null
-}
-
 /** Keeps one more of the person's prompts; the kept list, or null if every write lost. */
 async function keepPrompt($: Dollar, line: string): Promise<string[] | null> {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -267,11 +232,8 @@ let summaryMode: SummaryMode = 'auto'
  * said more since it was made, and once it is done it looks again, so a
  * prompt said while it ran is not left out; in `manual` mode only the first
  * summary of the session. `asked` (🔁 pressed): whenever there is a prompt.
- * Once the session has a ticket, the band shows that instead and no summary
- * is made.
  */
 async function startSummary($: Dollar, why: 'said' | 'asked'): Promise<void> {
-  if ((await $.state.get(TICKET)).value) return
   const prompts = (await $.state.get(PROMPTS)).value ?? []
   const held = await $.state.get(SUMMARY)
   const summary = held.value
@@ -329,89 +291,9 @@ async function runSummary($: Dollar, prompts: readonly string[], previous: strin
   if (result.status === 'done') await startSummary($, 'said')
 }
 
-/** The title graph-ops holds for the ticket, or null where it has none or cannot be asked. */
-async function graphOpsTitle($: Dollar, id: string): Promise<string | null> {
-  try {
-    const run = await $.process.run([GRAPH_ENGINE, 'get-ticket', id], { timeoutMs: 15_000 })
-    if (run.exitCode !== 0) return null
-    return graphTicketTitle(run.stdout, id)
-  } catch {
-    // graph-engine is not installed here, or did not answer in time.
-    return null
-  }
-}
-
-/** Stores the ticket the session works on, unless one is already stored. */
-async function fixTicket($: Dollar, ticket: Ticket): Promise<boolean> {
-  const held = await $.state.get(TICKET)
-  if (held.value) return false
-  const written = await $.state.set(TICKET, ticket, { ifVersion: held.version })
-  if (written.isSet) debug($, `the session works on ${ticket.id} (${ticket.source})`)
-  return written.isSet
-}
-
-/**
- * Looks for a ticket the prompt asks to work on. A slash command naming the
- * id in its arguments asks to; a prompt that names it is judged by the
- * model, so a ticket only mentioned in passing is no ticket of the session.
- * True once the session has a ticket.
- */
-async function detectTicket($: Dollar, line: string, args: string | undefined): Promise<boolean> {
-  if ((await $.state.get(TICKET)).value) return true
-  for (const id of ticketCandidates(line)) {
-    const isCommandArg = args !== undefined && ticketCandidates(args).includes(id)
-    if (!isCommandArg) {
-      const reply = await ask($, 'the ticket check', TICKET_WORK_SYSTEM, `チケット ID: ${id}\n\n依頼:\n${line}`, 5)
-      if (reply === null || !isYes(reply)) continue
-    }
-    const title = await graphOpsTitle($, id)
-    const ticket: Ticket = title === null ? { id, title: null, source: 'prompt' } : { id, title, source: 'graph-ops' }
-    await fixTicket($, ticket)
-    return true
-  }
-  return false
-}
-
-/**
- * Looks in the transcript for the title of the session's ticket while it is
- * not known (a Jira ticket a skill or a tool read, say); at most TITLE_TRIES
- * searches that find a mention but no title. Called after each turn.
- */
-async function findTicketTitle($: Dollar, mayAskModel: boolean): Promise<void> {
-  const held = await $.state.get(TICKET)
-  const ticket = held.value
-  if (!ticket || ticket.title !== null) return
-  const messages = (await $.session.messages()) as SessionMessagesResult
-  if (!Array.isArray(messages)) return
-  const results = messages.flatMap(m => (m.toolResults ?? []).map(r => r.text))
-  const texts = messages.flatMap(m => [m.text, ...(m.toolResults ?? []).map(r => r.text)])
-  // A tracker's record a skill or tool read: the title, with no model.
-  const recorded = structuredTitle(texts, ticket.id)
-  if (recorded !== null) {
-    debug($, `the title of ${ticket.id} is in a tool result`)
-    await $.state.set(TICKET, { id: ticket.id, title: recorded, source: 'transcript' }, { ifVersion: held.version })
-    return
-  }
-  if (!mayAskModel || (ticket.titleTries ?? 0) >= TITLE_TRIES) return
-  // Asked again only once the transcript says more of the ticket.
-  const mentionCount = texts.reduce((n, t) => n + t.split(ticket.id).length - 1, 0)
-  if (mentionCount <= (ticket.mentionCount ?? 0)) return
-  // Tool results first: where a skill read the ticket.
-  const mentions = ticketMentions([...results, ...messages.map(m => m.text)], ticket.id)
-  if (mentions === '') return
-  const reply = await ask($, 'the ticket title', TICKET_TITLE_SYSTEM, `チケット ID: ${ticket.id}\n\n抜粋:\n${mentions}`, 120)
-  const title = reply === null ? null : titleLine(reply)
-  const next: Ticket =
-    title === null
-      ? { ...ticket, titleTries: (ticket.titleTries ?? 0) + 1, mentionCount }
-      : { id: ticket.id, title, source: 'transcript' }
-  await $.state.set(TICKET, next, { ifVersion: held.version })
-}
-
-/** What follows one of the person's prompts: keep it, look for a ticket, else summarize. */
-async function onPrompt($: Dollar, line: string, args: string | undefined): Promise<void> {
+/** What follows one of the person's prompts: keep it, then summarize. */
+async function onPrompt($: Dollar, line: string): Promise<void> {
   await keepPrompt($, line)
-  if (await detectTicket($, line, args)) return
   await startSummary($, 'said')
 }
 
@@ -748,13 +630,12 @@ export const register: Register = (on, options) => {
       !('drop' in result && result.drop !== undefined) && e.isMeta === undefined && isOwnPrompt(e.origin)
     const isFirstCandidate = isOwn && e.command === undefined && text !== ''
     // A slash command counts as said when it carries arguments (a skill run on
-    // a ticket, say); one with none (`/clear`, `/config`) says nothing.
+    // an issue, say); one with none (`/clear`, `/config`) says nothing.
     const isSaid = isOwn && (e.command === undefined ? text !== '' : e.command.args.trim() !== '')
     const line = isSaid ? promptLine(text, e.command) : ''
-    const args = e.command?.args
     later($, 'prompt.submit', async () => {
       if (isFirstCandidate) await fixFirstPrompt($, summaryInput(text))
-      if (isSaid) await onPrompt($, line, args)
+      if (isSaid) await onPrompt($, line)
       await mergeBuffer($)
     })
     return result
@@ -798,26 +679,6 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // A skill working on a ticket reads it with a tool; its result may hold the
-  // title. Looked for (with no model) as each tool call of the session ends,
-  // at most every TOOL_SEARCH_GAP_MS.
-  on('tool.call', async ($, e, next) => {
-    const result = await next(e)
-    const now = Date.now()
-    if (e.agentId === undefined && now - lastToolSearch >= TOOL_SEARCH_GAP_MS) {
-      lastToolSearch = now
-      later($, 'tool.call', () => findTicketTitle($, false))
-    }
-    return result
-  }).catch(($, e, next) => next(e))
-
-  on('turn.complete', async ($, e, next) => {
-    const result = await next(e)
-    // A subagent's turn is not the session's.
-    if (e.agentId === undefined) later($, 'turn.complete', () => findTicketTitle($, true))
-    return result
-  }).catch(($, e, next) => next(e))
-
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
     // Drawing may not write state: remember the row, merge it later.
     const { origin, task, from, text } = e.props
@@ -858,34 +719,22 @@ export const register: Register = (on, options) => {
   })
 
   // The question dialog takes the prompt's place, the band with it: the
-  // ticket or summary goes above the dialog instead, on one row (the dialog
+  // summary goes above the dialog instead, on one row (the dialog
   // counts each 40 columns a row, its tree held to 12 on the terminal), with
   // no buttons.
   on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
     const dialog = await next(e)
     const firstPrompt = await read($, firstPromptAtom)
     const summary = await read($, summaryAtom)
-    const ticket = await read($, ticketAtom)
     const { Box, Text } = $.ui.resolve(e)
-    let line: JSX.Element
-    if (ticket) {
-      const shown = ticketBand(ticket, QUESTION_COLUMNS)
-      line = (
-        <Text wrap="truncate-end" weight="bold">
-          <Text color="suggestion">{shown.id}</Text>
-          {shown.title === '' ? '' : <Text color="claude">{` ${shown.title}`}</Text>}
-        </Text>
-      )
-    } else {
-      const band = bandText(firstPrompt, summary, QUESTION_COLUMNS)
-      if (band.kind === 'empty') return dialog
-      // No dim note here: the row is the summary's alone.
-      line = (
-        <Text wrap="truncate-end" color="claude" weight="bold">
-          {band.kind === 'pending' ? bandText(firstPrompt, { status: 'idle' }, QUESTION_COLUMNS).text : band.text}
-        </Text>
-      )
-    }
+    const band = bandText(firstPrompt, summary, QUESTION_COLUMNS)
+    if (band.kind === 'empty') return dialog
+    // No dim note here: the row is the summary's alone.
+    const line = (
+      <Text wrap="truncate-end" color="claude" weight="bold">
+        {band.kind === 'pending' ? bandText(firstPrompt, { status: 'idle' }, QUESTION_COLUMNS).text : band.text}
+      </Text>
+    )
     return (
       <Box flexDirection="column">
         {line}
@@ -900,36 +749,24 @@ export const register: Register = (on, options) => {
     const firstPrompt = await read($, firstPromptAtom)
     const summary = await read($, summaryAtom)
     const nav = await read($, navAtom)
-    const ticket = await read($, ticketAtom)
 
     const { Box, Button, Text } = $.ui.resolve(e)
-    const canRefresh = summaryMode === 'manual' && !ticket
+    const canRefresh = summaryMode === 'manual'
     const room = Math.max(8, e.props.bodyColumns - BUTTONS_WIDTH - (canRefresh ? BUTTON_CELLS + BUTTON_GAP : 0))
     const hasPrompts = nav.promptIds.length > 0
 
-    let left: JSX.Element
-    if (ticket) {
-      const shown = ticketBand(ticket, room)
-      left = (
-        <Text wrap="truncate-end" weight="bold">
-          <Text color="suggestion">{shown.id}</Text>
-          {shown.title === '' ? '' : <Text color="claude">{` ${shown.title}`}</Text>}
+    const band = bandText(firstPrompt, summary, room)
+    const left =
+      band.kind === 'empty' ? (
+        <Text wrap="truncate-end" dimColor>
+          {band.text}
+        </Text>
+      ) : (
+        <Text wrap="truncate-end" color="claude" weight="bold">
+          {band.text}
+          {band.note === undefined ? '' : <Text dimColor weight="regular">{band.note}</Text>}
         </Text>
       )
-    } else {
-      const band = bandText(firstPrompt, summary, room)
-      left =
-        band.kind === 'empty' ? (
-          <Text wrap="truncate-end" dimColor>
-            {band.text}
-          </Text>
-        ) : (
-          <Text wrap="truncate-end" color="claude" weight="bold">
-            {band.text}
-            {band.note === undefined ? '' : <Text dimColor weight="regular">{band.note}</Text>}
-          </Text>
-        )
-    }
 
     return (
       <Box flexDirection="row" justifyContent="space-between">

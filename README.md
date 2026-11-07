@@ -2,7 +2,7 @@
 
 English | [日本語](README.ja.md)
 
-A Claude Code plugin that adds a band above the prompt. Its left side tells you what the session is about: a one-line summary of what you have asked so far, or, in a session that works on a ticket, that ticket's ID and title. Its right side has buttons to step through your prompts in the conversation: ⏫ the first, 🔼 the previous, 🔽 the next, ⏬ the newest. The summary follows the session as it moves on (after each prompt, or only when you press 🔁, as you choose in settings), and it shows above Claude's question dialog too.
+A Claude Code plugin that adds a band above the prompt. Its left side tells you what the session is about: a one-line summary of what you have asked so far. Its right side has buttons to step through your prompts in the conversation: ⏫ the first, 🔼 the previous, 🔽 the next, ⏬ the newest. The summary follows the session as it moves on (after each prompt, or only when you press 🔁, as you choose in settings), and it shows above Claude's question dialog too.
 
 ## How it works
 
@@ -14,19 +14,6 @@ A Claude Code plugin that adds a band above the prompt. Its left side tells you 
 - In `manual` mode (see [`summaryMode`](#summarymode)) the first summary is still made by itself; after that it is made again only when you press 🔁 on the band.
 - The summary is drawn bold in the theme's `claude` colour, so it stands out from plain text in both light and dark themes.
 
-### The ticket
-
-When a prompt asks to work on a ticket, the band shows that ticket for the rest of the session instead of the summary.
-
-- A ticket is an ID such as `SCMP-00001` or `PROJ-123` in your prompt. Standards and versions such as `UTF-8` or `RFC-2119` are not tickets.
-- An ID in a slash command's arguments counts as a request to work on it. An ID in an ordinary prompt is judged by a model call: "fix PROJ-123" fixes the band to it, "what did PROJ-12 say about this?" does not.
-- The title is taken, whatever the tracker, from what the skill or tool working on the ticket read:
-  - A tool result that holds the ticket's record (JSON naming the ID under `id`, `key` and the like, with a `title`, `summary`, `subject` or `name`: graph-ops' `get-ticket`, Jira's `fields.summary`, ...) gives the title with no model call, looked for as each tool call ends
-  - Failing that, haiku looks for it in the parts of the conversation that mention the ID, at the end of a turn, tool results first, and again only once the ID is mentioned more (up to five tries)
-  - For a [graph-ops](https://github.com/imahiro-t/graph-ops) ticket, `graph-engine get-ticket <ID>` is also run when the ticket is found, where `graph-engine` is on the PATH
-  - Until then the band shows the ID alone
-- The ID is drawn in the theme's `suggestion` colour and the title in `claude`.
-
 ### The buttons
 
 - 🔼 and 🔽 go one prompt back and forward. Only your own prompts are stops, slash commands included: notifications, messages from other agents and the like are not. A move puts the prompt's row at the top of the transcript.
@@ -35,14 +22,11 @@ When a prompt asks to work on a ticket, the band shows that ticket for the rest 
 
 ### While Claude asks you a question (AskUserQuestion)
 
-The question dialog takes the prompt's place, and the band with it. The ticket or summary then shows on one row above the dialog, cut to fit (the dialog's rows are limited), without the buttons.
+The question dialog takes the prompt's place, and the band with it. The summary then shows on one row above the dialog, cut to fit (the dialog's rows are limited), without the buttons.
 
 ### What is sent, and when
 
 - The summary sends your first prompt and your newest prompts (each cut to 600 characters) to haiku after each prompt (`auto`) or on 🔁 (`manual`).
-- A prompt holding a ticket ID that is not in a slash command's arguments is sent to haiku once, to judge whether it asks to work on the ticket.
-- For a ticket whose title no tool result's record gives, the parts of the conversation around its ID (up to 6,000 characters) are sent to haiku after a turn, only when the ID is mentioned more than at the last try, at most five times.
-- `graph-engine get-ticket <ID>` runs on your machine for a ticket ID when it is found; where `graph-engine` is not installed, nothing happens.
 - ⏫ and ⏬ read the session's transcript file under `~/.claude/projects/` on your machine (its first 2 MB, or its last 200 lines, with `head` and `tail`). Nothing of it is sent anywhere.
 
 ## Install
@@ -71,7 +55,7 @@ How the band's summary is kept: `auto` (the default) or `manual`.
 | `auto` | The summary is made again after each of your prompts |
 | `manual` | The summary of the first prompt is made by itself; after that, only when you press 🔁 on the band. 🔁 makes it again even when nothing new was said |
 
-A session on a ticket shows no 🔁. Change it in `/config`, or in your settings:
+Change it in `/config`, or in your settings:
 
 ```json
 {
@@ -86,7 +70,6 @@ A session on a ticket shows no 🔁. Change it in `/config`, or in your settings
 ## Known limitations
 
 - Claude Code's own header at the top of the transcript, which names the prompt you are reading while you scroll, can name the prompt before the one 🔽 moved to. The header is Claude Code's, not this plugin's, and the plugin leaves it alone.
-- In a resumed session, tickets are found only in the prompts you send from then on, not in the slash commands of the earlier part.
 
 ## Development
 
