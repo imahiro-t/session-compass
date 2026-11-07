@@ -790,3 +790,33 @@ test('a session on a ticket has no 🔁, even in manual mode', { options: { summ
   expect(await ui.find({ key: 'refresh' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a slash command the person typed is a stop, in its place in the transcript', async ($, on) => {
+  const { clock, calls, transcript } = engine(on)
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  // The band was loaded late into a session with a slash command between two prompts.
+  transcript.push(
+    { role: 'user', text: 'one', toolUses: [] },
+    {
+      role: 'user',
+      text: '<command-message>graph-ops:autopilot-tree</command-message>\n<command-name>/graph-ops:autopilot-tree</command-name>\n<command-args>SCMP-00001</command-args>',
+      toolUses: [],
+    },
+    { role: 'user', text: 'two', toolUses: [] },
+  )
+  await start($)
+  await clock.settle()
+  // Drawn newest first, as scrolling up shows them; the command's row as the terminal shows it.
+  await drawRow($, 'r2', 'two')
+  await drawRow($, 'rc', '/graph-ops:autopilot-tree SCMP-00001')
+  await drawRow($, 'r1', 'one')
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'first' })
+  await ui.press({ key: 'latest' })
+  // The command sits between one and two, not ahead of them.
+  expect(calls.scroll).toEqual(['r1', 'r2'])
+  await ui.unmount()
+})

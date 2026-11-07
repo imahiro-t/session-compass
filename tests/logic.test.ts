@@ -5,6 +5,8 @@ import {
   EMPTY_TEXT,
   PENDING_NOTE,
   bandText,
+  commandLine,
+  typedText,
   graphTicketTitle,
   isOwnPrompt,
   isStopId,
@@ -175,7 +177,7 @@ describe('the nav', () => {
     expect(JSON.stringify(next).length).toBeLessThan(200)
   })
 
-  test('userPromptTexts keeps the person\'s rows only', () => {
+  test('userPromptTexts keeps the person\'s rows only, slash commands as typed', () => {
     expect(
       userPromptTexts([
         { role: 'user', text: ' hi ' },
@@ -183,10 +185,23 @@ describe('the nav', () => {
         { role: 'user', text: '', toolResults: [] },
         { role: 'user', text: 'result', toolResults: [{}] },
         { role: 'user', text: '<command-name>/clear</command-name>' },
+        {
+          role: 'user',
+          text: '<command-message>graph-ops:autopilot-tree</command-message>\n<command-name>/graph-ops:autopilot-tree</command-name>\n<command-args>SCMP-00001 --run r1</command-args>',
+        },
+        { role: 'user', text: '<local-command-stdout>ok</local-command-stdout>' },
         { role: 'user', text: '<task-notification>done</task-notification>' },
         { role: 'user', text: 'bye' },
       ]),
-    ).toEqual(['hi', 'bye'])
+    ).toEqual(['hi', '/clear', '/graph-ops:autopilot-tree SCMP-00001 --run r1', 'bye'])
+  })
+
+  test('a stored slash command reads back as typed; other text is as it is', () => {
+    expect(commandLine('<command-name>/model</command-name>\n<command-args> haiku </command-args>')).toBe('/model haiku')
+    expect(commandLine('<command-name>graph-ops:ui</command-name>')).toBe('/graph-ops:ui')
+    expect(commandLine('plain text')).toBe(null)
+    expect(typedText('<command-name>/clear</command-name>')).toBe('/clear')
+    expect(typedText('/graph-ops:autopilot-tree SCMP-00001')).toBe('/graph-ops:autopilot-tree SCMP-00001')
   })
 })
 

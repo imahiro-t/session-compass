@@ -134,19 +134,45 @@ export function bandText(
 
 /**
  * Rows of `$.session.messages()` that are machinery, not something the person
- * typed: a slash command's expansion, a command's local output, a
- * notification or a reminder the engine filed as a user row.
+ * typed: a command's local output, a notification or a reminder the engine
+ * filed as a user row. (A slash command the person typed is stored as
+ * `<command-name>` markup too; `commandLine` reads it back.)
  */
 const MACHINE_ROW = /^<(command-|local-command-|task-notification|system-reminder)/
 
-/** The person's prompt rows of `$.session.messages()`, oldest first. */
+/**
+ * A slash command as the person typed it, from the markup the transcript
+ * stores it as (`<command-name>/x</command-name>` and `<command-args>`):
+ * `/x args`. Null for any other text.
+ */
+export function commandLine(text: string): string | null {
+  const name = /<command-name>\s*([^<]*?)\s*<\/command-name>/.exec(text)?.[1]
+  if (name === undefined || name === '') return null
+  const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1]?.trim() ?? ''
+  const slashed = name.startsWith('/') ? name : `/${name}`
+  return args === '' ? slashed : `${slashed} ${args}`
+}
+
+/**
+ * A prompt row's text as the person typed it: a stored slash command read
+ * back from its markup, anything else as it is. What drawn rows and
+ * transcript rows are matched by.
+ */
+export function typedText(text: string): string {
+  return commandLine(text) ?? text
+}
+
+/** The person's prompt rows of `$.session.messages()`, oldest first, slash commands included. */
 export function userPromptTexts(
   messages: readonly { role: string; text: string; toolResults?: readonly unknown[] }[],
 ): string[] {
   return messages
     .filter(m => m.role === 'user' && (m.toolResults?.length ?? 0) === 0)
-    .map(m => m.text.trim())
-    .filter(text => text !== '' && !MACHINE_ROW.test(text))
+    .map(m => {
+      const text = m.text.trim()
+      return commandLine(text) ?? (MACHINE_ROW.test(text) ? '' : text)
+    })
+    .filter(text => text !== '')
 }
 
 /**

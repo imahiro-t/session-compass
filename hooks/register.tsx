@@ -23,6 +23,7 @@ import {
   ticketMentions,
   titleLine,
   unknownPrompts,
+  typedText,
   userPromptTexts,
   copyViewport,
   emptyViewport,
@@ -83,6 +84,11 @@ const BUTTONS_WIDTH = BUTTONS.length * BUTTON_CELLS + (BUTTONS.length - 1) * BUT
  * the dialog counts as one row.
  */
 const QUESTION_COLUMNS = 39
+
+/** Screens the first button climbs at most, looking for earlier prompts. */
+const WALK_STEPS = 12
+/** How long the rows a climb brought into view get to draw, in ms. */
+const WALK_WAIT_MS = 150
 
 /** `$.session.messages()` returns at most this many entries, the newest. */
 const MESSAGES_LIMIT = 4096
@@ -395,7 +401,9 @@ async function onStart($: Dollar): Promise<void> {
       // The prompts it said, for the summary, unless some are kept already.
       const held = await $.state.get(PROMPTS)
       if ((held.value ?? []).length === 0) {
-        const prompts = texts.map(t => promptLine(t)).reduce<string[]>((kept, line) => withPrompt(kept, line), [])
+        // A slash command with no arguments (`/clear`) says nothing to summarize.
+        const said = texts.filter(t => !/^\/\S+$/.test(t))
+        const prompts = said.map(t => promptLine(t)).reduce<string[]>((kept, line) => withPrompt(kept, line), [])
         await $.state.set(PROMPTS, prompts, { ifVersion: held.version })
       }
     }
@@ -438,13 +446,76 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
       debug($, `could not scroll to the prompt: ${scrolled.deny}`)
       return
     }
-    await writeNav($, 'cursor', stored => {
-      const current = withoutBadStops(stored)
-      return current === stored && current.cursorId === target.id ? null : { ...current, cursorId: target.id }
-    })
+    await setCursor($, target.id)
+    if (target.index === 0) await walkUp($, surface, target.id)
   } catch (error) {
     debug($, `navigation failed: ${String(error)}`)
   }
+}
+
+/** Writes the cursor (and drops stops that are no real messages). */
+async function setCursor($: Dollar, id: string): Promise<void> {
+  await writeNav($, 'cursor', stored => {
+    const current = withoutBadStops(stored)
+    return current === stored && current.cursorId === id ? null : { ...current, cursorId: id }
+  })
+}
+
+/** Scrolls a row into view; the reason when it did not move. */
+async function scrollTo($: Dollar, id: string, block: 'start' | 'end'): Promise<string | undefined> {
+  try {
+    return (await $.ui.scroll({ to: { requestId: id }, block })).deny
+  } catch (error) {
+    return String(error)
+  }
+}
+
+/** Waits `ms` on the session's clock. */
+function sleep($: Dollar, ms: number): Promise<void> {
+  return new Promise(resolve => {
+    $.clock.after(ms, () => resolve())
+  })
+}
+
+/**
+ * Climbs from the first prompt the mod knows to the session's first one.
+ *
+ * Only drawn rows tell their ids, and a long or resumed transcript draws
+ * only the rows near the viewport, so the earliest prompt known may not be
+ * the first. While the transcript holds more of the person's prompts than
+ * the mod knows, it shows the screen above the known first prompt (that
+ * prompt at the bottom), lets the rows there draw, and moves on to any
+ * earlier prompt they show; at the last one found it puts that prompt on
+ * top. It stops where the screen above shows no prompt (a reply longer than
+ * the screen) or a scroll is refused.
+ */
+async function walkUp($: Dollar, surface: string, from: string): Promise<void> {
+  const nav = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV)
+  const { texts } = await transcriptPrompts($)
+  if (texts.length <= nav.promptIds.length) return
+  debug($, `the transcript has ${texts.length} prompts, the band knows ${nav.promptIds.length}: looking above ${from}`)
+  let current = from
+  for (let step = 0; step < WALK_STEPS; step++) {
+    const denied = await scrollTo($, current, 'end')
+    if (denied !== undefined) {
+      debug($, `could not look above ${current}: ${denied}`)
+      break
+    }
+    await sleep($, WALK_WAIT_MS)
+    if (renderBuffer.size > 0) await mergeBuffer($)
+    const first = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV).promptIds[0]
+    if (first === undefined || first === current) break
+    debug($, `found ${first} above ${current}`)
+    current = first
+  }
+  const ids = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV).promptIds
+  noteMove(viewOn(surface), ids, Math.max(0, ids.indexOf(current)), Date.now())
+  const denied = await scrollTo($, current, 'start')
+  if (denied !== undefined) {
+    debug($, `could not scroll to the prompt: ${denied}`)
+    return
+  }
+  if (current !== from) await setCursor($, current)
 }
 
 export const register: Register = (on, options) => {
@@ -505,7 +576,7 @@ export const register: Register = (on, options) => {
     // Drawing may not write state: remember the row, merge it later.
     const { origin, task, from, text } = e.props
     if (isStopId(e.requestId) && isOwnPrompt(origin, { task, from }) && text.trim() !== '') {
-      renderBuffer.set(e.requestId, promptKey(text))
+      renderBuffer.set(e.requestId, promptKey(typedText(text)))
       if ('onScreen' in e.props && e.props.onScreen !== undefined) {
         noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, true, Date.now())
       }
