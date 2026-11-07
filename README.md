@@ -29,8 +29,8 @@ When a prompt asks to work on a ticket, the band shows that ticket for the rest 
 
 ### The buttons
 
-- ⏫ goes to your first prompt, ⏬ to the newest, 🔼 and 🔽 one prompt back and forward. Only your own prompts are stops: notifications, messages from other agents and the like are not.
-- A move puts the prompt's row at the top of the transcript.
+- 🔼 and 🔽 go one prompt back and forward. Only your own prompts are stops, slash commands included: notifications, messages from other agents and the like are not. A move puts the prompt's row at the top of the transcript.
+- ⏫ goes to the very first prompt of the session, and ⏬ to the very end of the transcript (the line that closes the last turn, or the newest row). Both read the session's transcript file for it, so they reach rows far off screen that the band has never seen drawn, in a long or resumed session too.
 - If you scroll the transcript yourself, the buttons count from what you are reading: 🔼 goes back to the start of the prompt whose reply is on screen, 🔽 on to the next one. Until you scroll, they count from where the last button left you.
 
 ### While Claude asks you a question (AskUserQuestion)
@@ -43,6 +43,7 @@ The question dialog takes the prompt's place, and the band with it. The ticket o
 - A prompt holding a ticket ID that is not in a slash command's arguments is sent to haiku once, to judge whether it asks to work on the ticket.
 - For a ticket whose title no tool result's record gives, the parts of the conversation around its ID (up to 6,000 characters) are sent to haiku after a turn, only when the ID is mentioned more than at the last try, at most five times.
 - `graph-engine get-ticket <ID>` runs on your machine for a ticket ID when it is found; where `graph-engine` is not installed, nothing happens.
+- ⏫ and ⏬ read the session's transcript file under `~/.claude/projects/` on your machine (its first 2 MB, or its last 200 lines, with `head` and `tail`). Nothing of it is sent anywhere.
 
 ## Install
 
