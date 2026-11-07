@@ -162,6 +162,95 @@ export function typedText(text: string): string {
   return commandLine(text) ?? text
 }
 
+/** One line of the session's transcript file, as far as the band reads it. */
+export type TranscriptRow = {
+  type?: unknown
+  uuid?: unknown
+  isMeta?: unknown
+  isSidechain?: unknown
+  origin?: { kind?: unknown } | null
+  message?: { content?: unknown } | null
+}
+
+/** The transcript file's lines as rows; a line cut short (at a read's edge) or not JSON is left out. */
+export function parseRows(text: string): TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    try {
+      const row = JSON.parse(line) as unknown
+      if (row !== null && typeof row === 'object') rows.push(row as TranscriptRow)
+    } catch {
+      // A line cut short at the read's edge.
+    }
+  }
+  return rows
+}
+
+/** A stored row's text blocks joined; null when it holds a tool result (not something typed). */
+function rowText(content: unknown): string | null {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return null
+  const parts: string[] = []
+  for (const block of content as { type?: unknown; text?: unknown }[]) {
+    if (block?.type === 'tool_result') return null
+    if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+  }
+  return parts.join('\n')
+}
+
+/** Whether a stored row is of the main conversation, as drawn (no subagent's, no meta row). */
+function isMainRow(row: TranscriptRow): row is TranscriptRow & { uuid: string } {
+  return typeof row.uuid === 'string' && row.isSidechain !== true && row.isMeta !== true
+}
+
+/**
+ * The first prompt the person sent, from the transcript file's rows: a user
+ * row of the main conversation that is the person's own (stamped `human`, or
+ * unstamped from before stamps), typed (no tool result) and not machinery;
+ * a slash command counts, read back as typed. Its id is what its row is drawn
+ * and scrolled to under.
+ */
+export function firstPromptRow(rows: readonly TranscriptRow[]): { id: string; text: string } | null {
+  for (const row of rows) {
+    if (row.type !== 'user' || !isMainRow(row)) continue
+    const kind = row.origin?.kind
+    if (kind !== undefined && kind !== 'human' && !(typeof kind === 'string' && OWN_KINDS.has(kind))) continue
+    const text = rowText(row.message?.content)?.trim()
+    if (text === undefined || text === '') continue
+    const typed = commandLine(text)
+    if (typed === null && MACHINE_ROW.test(text)) continue
+    return { id: row.uuid, text: typed ?? text }
+  }
+  return null
+}
+
+/**
+ * The id of the row drawn lowest in the transcript, from the file's last
+ * rows: the newest row of the main conversation that draws (a reply's text,
+ * a tool call, a tool result under its call, a prompt), by the id its row is
+ * drawn under. A reply's thinking draws no row of its own and is passed over.
+ */
+export function lastDrawnRowId(rows: readonly TranscriptRow[]): string | null {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!
+    if ((row.type !== 'assistant' && row.type !== 'user') || !isMainRow(row)) continue
+    const content = row.message?.content
+    if (typeof content === 'string') {
+      if (content.trim() !== '') return row.uuid
+      continue
+    }
+    if (!Array.isArray(content)) continue
+    for (let j = content.length - 1; j >= 0; j--) {
+      const block = content[j] as { type?: unknown; id?: unknown; tool_use_id?: unknown; text?: unknown } | null
+      if (block?.type === 'tool_use' && typeof block.id === 'string') return block.id
+      if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') return block.tool_use_id
+      if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '') return row.uuid
+    }
+  }
+  return null
+}
+
 /**
  * The id of the row an appended message draws last in the transcript: its
  * last tool call's (the tool rows are drawn below the message's text), else

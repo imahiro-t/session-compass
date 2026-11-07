@@ -36,6 +36,9 @@ import {
   withPrompt,
   withoutBadStops,
   rowIdOf,
+  firstPromptRow,
+  lastDrawnRowId,
+  parseRows,
 } from './logic'
 import type { NavKind, Viewport } from './logic'
 
@@ -89,6 +92,15 @@ const BUTTONS_WIDTH = BUTTONS.length * BUTTON_CELLS + (BUTTONS.length - 1) * BUT
  * the dialog counts as one row.
  */
 const QUESTION_COLUMNS = 39
+
+/** Bytes of the transcript file's head ⏫ reads for the first prompt. */
+const HEAD_BYTES = 2_000_000
+/** Lines of the transcript file's tail ⏬ reads for the last row. */
+const TAIL_LINES = 200
+
+// The session's transcript file, as Claude Code's hooks name it; null until
+// one has. It moves with a resume or a /clear, so each one sets it again.
+let transcriptPath: string | null = null
 
 /** The doors whose rows the transcript draws at its end: what ⏬ goes to. */
 const NEWEST_DOORS: ReadonlySet<string> = new Set(['prompt', 'command', 'response'])
@@ -464,6 +476,10 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
         `(cursor ${nav.cursorId ?? 'end'}, view ${view === null ? 'none' : `${view.lo}..${view.hi} at ${view.at}`}` +
         `${isViewFirst ? ', scrolled by hand' : ''}, moving ${viewport.direction ?? 'unknown'})`,
     )
+    // ⏫ and ⏬ go to the transcript's own first prompt and last row, read from
+    // its file: rows far off screen are never drawn, so the band may not know them.
+    if (kind === 'first' && (await toFirstOfFile($, surface, nav))) return
+    if (kind === 'latest' && (await toEndOfFile($, surface, nav))) return
     if (target === null) return
     debug($, `${kind} scrolls to ${target.id}`)
     // What the rows said of the old viewport no longer holds once it moves;
@@ -486,6 +502,73 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
   } catch (error) {
     debug($, `navigation failed: ${String(error)}`)
   }
+}
+
+/** What a command printed, or null where it could not run or failed. */
+async function runText($: Dollar, argv: readonly string[]): Promise<string | null> {
+  try {
+    const run = await $.process.run(argv, { timeoutMs: 10_000 })
+    return run.exitCode === 0 ? run.stdout : null
+  } catch (error) {
+    debug($, `could not run ${argv[0]}: ${String(error)}`)
+    return null
+  }
+}
+
+/**
+ * ⏫ from the transcript file: puts the session's first prompt on top, by the
+ * id its file gives, and makes it a stop if the band did not know it. False
+ * where the file cannot be read or the scroll did not land.
+ */
+async function toFirstOfFile($: Dollar, surface: string, nav: Nav): Promise<boolean> {
+  if (transcriptPath === null) return false
+  const head = await runText($, ['head', '-c', String(HEAD_BYTES), transcriptPath])
+  const first = head === null ? null : firstPromptRow(parseRows(head))
+  if (first === null) return false
+  const viewport = viewOn(surface)
+  const before = copyViewport(viewport)
+  const index = nav.promptIds.indexOf(first.id)
+  noteMove(viewport, nav.promptIds, Math.max(0, index), Date.now())
+  const denied = await scrollTo($, first.id, 'start')
+  if (denied !== undefined) {
+    viewBySurface.set(surface, before)
+    debug($, `could not scroll to the transcript's first prompt ${first.id}: ${denied}`)
+    return false
+  }
+  debug($, `first lands on ${first.id}, the transcript's first prompt`)
+  if (index === -1) {
+    const keys = (await transcriptPrompts($)).texts.map(promptKey)
+    await writeNav($, 'first prompt', current =>
+      withPastPrompts(withoutBadStops(current), [{ id: first.id, key: promptKey(first.text) }], keys),
+    )
+  }
+  await setCursor($, first.id)
+  return true
+}
+
+/**
+ * ⏬ from the transcript file: puts the bottom of the row drawn lowest on the
+ * viewport's bottom, by the id the file's last rows give, the cursor at the
+ * end of the transcript. False where the file cannot be read or the scroll
+ * did not land.
+ */
+async function toEndOfFile($: Dollar, surface: string, nav: Nav): Promise<boolean> {
+  if (transcriptPath === null) return false
+  const tail = await runText($, ['tail', '-n', String(TAIL_LINES), transcriptPath])
+  const last = tail === null ? null : lastDrawnRowId(parseRows(tail))
+  if (last === null) return false
+  const viewport = viewOn(surface)
+  const before = copyViewport(viewport)
+  noteMove(viewport, nav.promptIds, nav.promptIds.length, Date.now())
+  const denied = await scrollTo($, last, 'end')
+  if (denied !== undefined) {
+    viewBySurface.set(surface, before)
+    debug($, `could not scroll to the end of ${last}, the transcript's last row: ${denied}`)
+    return false
+  }
+  debug($, `latest lands on the end of ${last}, the transcript's last row`)
+  await writeNav($, 'cursor', current => (current.cursorId === null ? null : { ...current, cursorId: null }))
+  return true
 }
 
 /**
@@ -626,6 +709,17 @@ export const register: Register = (on, options) => {
       noteNewestRow(rowIdOf(e.uuid, (e.message as { content?: unknown }).content))
     }
     return result
+  }).catch(($, e, next) => next(e))
+
+  // The transcript file's path, which ⏫ and ⏬ read: named by the classic
+  // hooks' input, at the session's start (a resume included) and each prompt.
+  on('classic.SessionStart', ($, e, next) => {
+    transcriptPath = e.transcript_path
+    return next(e)
+  }).catch(($, e, next) => next(e))
+  on('classic.UserPromptSubmit', ($, e, next) => {
+    transcriptPath = e.transcript_path
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   // A skill working on a ticket reads it with a tool; its result may hold the

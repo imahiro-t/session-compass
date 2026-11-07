@@ -6,6 +6,9 @@ import {
   PENDING_NOTE,
   bandText,
   commandLine,
+  firstPromptRow,
+  lastDrawnRowId,
+  parseRows,
   rowIdOf,
   typedText,
   graphTicketTitle,
@@ -530,6 +533,43 @@ describe('which way the viewport moves', () => {
     // person reads, not past it to c.
     expect(navTarget('prev', ids, 'd', view, false)?.id).toBe('c')
     expect(navTarget('prev', ids, 'd', view, true)?.id).toBe('d')
+  })
+})
+
+describe('the transcript file', () => {
+  const lines = [
+    { type: 'permission-mode' },
+    { type: 'user', uuid: 'meta1', isMeta: true, message: { content: 'Base directory for this skill' } },
+    { type: 'user', uuid: 'n1', origin: { kind: 'task-notification' }, message: { content: '<task-notification>x</task-notification>' } },
+    { type: 'user', uuid: 's1', isSidechain: true, origin: { kind: 'human' }, message: { content: 'a subagent prompt' } },
+    {
+      type: 'user',
+      uuid: 'c1',
+      origin: { kind: 'human' },
+      message: { content: '<command-message>graph-ops:autopilot-tree</command-message>\n<command-name>/graph-ops:autopilot-tree</command-name>\n<command-args>SCMP-00001</command-args>' },
+    },
+    { type: 'user', uuid: 'p2', origin: { kind: 'human' }, message: { content: [{ type: 'text', text: 'next prompt' }] } },
+    { type: 'assistant', uuid: 'a1', message: { content: [{ type: 'text', text: 'ok' }] } },
+    { type: 'assistant', uuid: 'a2', message: { content: [{ type: 'tool_use', id: 'toolu_9', name: 'Bash' }] } },
+    { type: 'user', uuid: 'r1', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_9', content: 'done' }] } },
+    { type: 'assistant', uuid: 'a3', message: { content: [{ type: 'thinking', thinking: '...' }] } },
+    { type: 'api-request' },
+  ]
+  const text = `${lines.map(l => JSON.stringify(l)).join('\n')}\n{"type":"user","uuid":"cut`
+
+  test('a line cut at the read\'s edge is left out', () => {
+    expect(parseRows(text).length).toBe(lines.length)
+  })
+
+  test('the first prompt is the person\'s first typed row, a slash command as typed', () => {
+    expect(firstPromptRow(parseRows(text))).toEqual({ id: 'c1', text: '/graph-ops:autopilot-tree SCMP-00001' })
+  })
+
+  test('the last drawn row passes over thinking: a tool result is drawn under its call', () => {
+    expect(lastDrawnRowId(parseRows(text))).toBe('toolu_9')
+    const ending = [...lines.slice(0, 7)].map(l => JSON.stringify(l)).join('\n')
+    expect(lastDrawnRowId(parseRows(ending))).toBe('a1')
+    expect(lastDrawnRowId([])).toBe(null)
   })
 })
 
