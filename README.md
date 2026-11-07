@@ -53,6 +53,8 @@ This repository is its own marketplace (`.claude-plugin/marketplace.json`, named
 2. On the settings screen, set `summaryMode` (default `auto`)
 3. Once `Installed session-compass. Plugin is now active.` shows, it works in that session right away
 
+Session Compass is also listed in the [erin-the-black-plugins](https://github.com/imahiro-t/claude-plugins) marketplace (installed from there, the settings key in the example below is `session-compass@erin-the-black-plugins` instead of `session-compass@session-compass`). Install it from one of the two marketplaces only: installed from both, its hooks are registered twice and the band is drawn by both. To switch from one to the other, uninstall the one you have first.
+
 ## Settings (userConfig)
 
 ### `summaryMode`
@@ -95,6 +97,23 @@ Saving a file reloads the plugin in that session. Before a change goes in, check
 claude plugin validate .
 claude plugin test .
 ```
+
+## Releasing
+
+1. Raise `version` in `.claude-plugin/plugin.json` and merge the change into `main`
+2. Tag that commit of `main` with `vX.Y.Z` and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
+3. In [imahiro-t/claude-plugins](https://github.com/imahiro-t/claude-plugins), set the `ref` of the `session-compass` entry in `.claude-plugin/marketplace.json` to the new tag
+4. Run `claude plugin validate .` at the root of claude-plugins, and once it passes, get the change into its `main`
+5. (Optional) Try the install from the erin-the-black-plugins marketplace with a temporary configuration directory, using the same directory for every command:
+
+   ```sh
+   TMP=$(mktemp -d)
+   CLAUDE_CONFIG_DIR="$TMP" claude plugin marketplace add imahiro-t/claude-plugins
+   CLAUDE_CONFIG_DIR="$TMP" claude plugin install session-compass@erin-the-black-plugins
+   rm -rf "$TMP"
+   ```
+
+Push the tag before the `ref` reaches claude-plugins' `main`: until the tag exists, installing from erin-the-black-plugins fails, and `claude plugin validate .` does not catch that.
 
 ## License
 

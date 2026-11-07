@@ -53,6 +53,8 @@ Claude Code のプロンプトの上に帯を出すプラグインです。帯�
 2. 設定画面で `summaryMode` を選びます（初期値は `auto`）
 3. `Installed session-compass. Plugin is now active.` と表示されたら、そのセッションですぐに使えます
 
+Session Compass は [erin-the-black-plugins](https://github.com/imahiro-t/claude-plugins) マーケットプレイスにも登録されています（そちらからインストールした場合、下の設定例のキーは `session-compass@session-compass` ではなく `session-compass@erin-the-black-plugins` になります）。インストールはどちらか一方のマーケットプレイスからだけにしてください。両方から入れるとフックが二重に登録され、帯が 2 つのプラグインから描かれます。乗り換えるときは、先に入っている方をアンインストールしてください。
+
 ## 設定（userConfig）
 
 ### `summaryMode`
@@ -95,6 +97,23 @@ claude --debug --plugin-dir .
 claude plugin validate .
 claude plugin test .
 ```
+
+## リリース手順
+
+1. `.claude-plugin/plugin.json` の `version` を上げ、その変更を `main` にマージする
+2. その `main` のコミットに `vX.Y.Z` のタグを付けて push する: `git tag vX.Y.Z && git push origin vX.Y.Z`
+3. [imahiro-t/claude-plugins](https://github.com/imahiro-t/claude-plugins) の `.claude-plugin/marketplace.json` で、`session-compass` のエントリの `ref` を新しいタグにする
+4. claude-plugins のルートで `claude plugin validate .` を実行し、通ったらその変更を claude-plugins の `main` に入れる
+5. （任意）一時的な設定ディレクトリで、erin-the-black-plugins からのインストールを試す。どのコマンドにも同じディレクトリを使う:
+
+   ```sh
+   TMP=$(mktemp -d)
+   CLAUDE_CONFIG_DIR="$TMP" claude plugin marketplace add imahiro-t/claude-plugins
+   CLAUDE_CONFIG_DIR="$TMP" claude plugin install session-compass@erin-the-black-plugins
+   rm -rf "$TMP"
+   ```
+
+タグは、`ref` の変更が claude-plugins の `main` に入る前に push してください。タグが無い間は erin-the-black-plugins からのインストールが失敗し、`claude plugin validate .` はそれを検出しません。
 
 ## ライセンス
 
