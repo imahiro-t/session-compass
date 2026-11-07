@@ -162,6 +162,22 @@ export function typedText(text: string): string {
   return commandLine(text) ?? text
 }
 
+/**
+ * The id of the row an appended message draws last in the transcript: its
+ * last tool call's (the tool rows are drawn below the message's text), else
+ * the message's own.
+ */
+export function rowIdOf(uuid: string, content: unknown): string {
+  if (!Array.isArray(content)) return uuid
+  for (let i = content.length - 1; i >= 0; i--) {
+    const block = content[i] as { type?: unknown; id?: unknown } | null
+    if (block !== null && typeof block === 'object' && block.type === 'tool_use' && typeof block.id === 'string') {
+      return block.id
+    }
+  }
+  return uuid
+}
+
 /** The person's prompt rows of `$.session.messages()`, oldest first, slash commands included. */
 export function userPromptTexts(
   messages: readonly { role: string; text: string; toolResults?: readonly unknown[] }[],

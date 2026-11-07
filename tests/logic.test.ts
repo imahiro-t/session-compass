@@ -6,6 +6,7 @@ import {
   PENDING_NOTE,
   bandText,
   commandLine,
+  rowIdOf,
   typedText,
   graphTicketTitle,
   isOwnPrompt,
@@ -194,6 +195,13 @@ describe('the nav', () => {
         { role: 'user', text: 'bye' },
       ]),
     ).toEqual(['hi', '/clear', '/graph-ops:autopilot-tree SCMP-00001 --run r1', 'bye'])
+  })
+
+  test('the row an appended message draws last: its last tool call, else itself', () => {
+    expect(rowIdOf('m1', [{ type: 'text', text: 'a' }, { type: 'tool_use', id: 't1' }, { type: 'tool_use', id: 't2' }])).toBe('t2')
+    expect(rowIdOf('m1', [{ type: 'text', text: 'a' }])).toBe('m1')
+    expect(rowIdOf('m1', 'plain')).toBe('m1')
+    expect(rowIdOf('m1', [null, { type: 'tool_use' }])).toBe('m1')
   })
 
   test('a stored slash command reads back as typed; other text is as it is', () => {

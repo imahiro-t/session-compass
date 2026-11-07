@@ -34,6 +34,7 @@ import {
   withPastPrompts,
   withPrompt,
   withoutBadStops,
+  rowIdOf,
 } from './logic'
 import type { NavKind, Viewport } from './logic'
 
@@ -85,6 +86,11 @@ const BUTTONS_WIDTH = BUTTONS.length * BUTTON_CELLS + (BUTTONS.length - 1) * BUT
  */
 const QUESTION_COLUMNS = 39
 
+/** The doors whose rows the transcript draws at its end: what ⏬ goes to. */
+const NEWEST_DOORS: ReadonlySet<string> = new Set(['prompt', 'command', 'response'])
+/** How many of the newest rows ⏬ keeps to try, newest last. */
+const NEWEST_KEPT = 3
+
 /** Screens the first button climbs at most, looking for earlier prompts. */
 const WALK_STEPS = 12
 /** How long the rows a climb brought into view get to draw, in ms. */
@@ -109,6 +115,17 @@ const renderBuffer = new Map<string, string>()
 // surface: where the person has scrolled to, read when a button is pressed.
 // Kept here, not in state, for the same reason as renderBuffer.
 const viewBySurface = new Map<string, Viewport>()
+
+// The ids of the newest rows appended to the main conversation, newest last:
+// where ⏬ goes. A reload empties it; the next row appended starts it again.
+const newestRows: string[] = []
+
+function noteNewestRow(id: string): void {
+  const at = newestRows.indexOf(id)
+  if (at !== -1) newestRows.splice(at, 1)
+  newestRows.push(id)
+  if (newestRows.length > NEWEST_KEPT) newestRows.shift()
+}
 
 function viewOn(surface: string): Viewport {
   let view = viewBySurface.get(surface)
@@ -435,15 +452,14 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     // not land leaves the viewport, and what is known of it, as it was.
     const before = copyViewport(viewport)
     noteMove(viewport, nav.promptIds, target.index, Date.now())
-    let scrolled: { deny?: string }
-    try {
-      scrolled = await $.ui.scroll({ to: { requestId: target.id }, block: 'start' })
-    } catch (error) {
-      scrolled = { deny: String(error) }
-    }
-    if (scrolled.deny !== undefined) {
+    // ⏬ goes to the end of the transcript: the bottom of the newest row on
+    // the viewport's bottom. Where none of the newest rows can be reached, it
+    // goes to the newest prompt, as the other buttons go to theirs.
+    const landed = kind === 'latest' ? await scrollToEnd($) : false
+    const denied = landed ? undefined : await scrollTo($, target.id, 'start')
+    if (denied !== undefined) {
       viewBySurface.set(surface, before)
-      debug($, `could not scroll to the prompt: ${scrolled.deny}`)
+      debug($, `could not scroll to the prompt: ${denied}`)
       return
     }
     await setCursor($, target.id)
@@ -451,6 +467,23 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
   } catch (error) {
     debug($, `navigation failed: ${String(error)}`)
   }
+}
+
+/**
+ * Puts the bottom of the newest row of the transcript on the viewport's
+ * bottom, trying the newest rows appended, newest first; true once one
+ * landed.
+ */
+async function scrollToEnd($: Dollar): Promise<boolean> {
+  for (const id of [...newestRows].reverse()) {
+    const denied = await scrollTo($, id, 'end')
+    if (denied === undefined) {
+      debug($, `latest lands on the end of ${id}`)
+      return true
+    }
+    debug($, `could not scroll to the end of ${id}: ${denied}`)
+  }
+  return false
 }
 
 /** Writes the cursor (and drops stops that are no real messages). */
@@ -562,6 +595,17 @@ export const register: Register = (on, options) => {
       if (isOwn) await writeNav($, 'new prompt', nav => withLivePrompt(nav, uuid))
       await mergeBuffer($)
     })
+    return result
+  }).catch(($, e, next) => next(e))
+
+  // The newest rows of the main conversation, for ⏬: a prompt or a slash
+  // command by its id, a reply by its last tool call's id (the tool row is
+  // drawn below the reply's text) or else its own.
+  on('session.append', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined && result.deny === undefined && NEWEST_DOORS.has(e.door)) {
+      noteNewestRow(rowIdOf(e.uuid, (e.message as { content?: unknown }).content))
+    }
     return result
   }).catch(($, e, next) => next(e))
 

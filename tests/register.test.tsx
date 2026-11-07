@@ -820,3 +820,41 @@ test('a slash command the person typed is a stop, in its place in the transcript
   expect(calls.scroll).toEqual(['r1', 'r2'])
   await ui.unmount()
 })
+
+test('⏬ goes to the end of the newest row, its last tool call\'s for a reply, newest first', async ($, on) => {
+  const { clock, calls } = engine(on)
+  await start($)
+  await say($, 'u1', 'one')
+  // The reply: text, then two tool calls, the last drawn lowest.
+  await $.session.append({
+    door: 'response',
+    origin: { kind: 'model' } as never,
+    uuid: 'a1',
+    message: {
+      type: 'assistant',
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'looking' },
+        { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: {} },
+        { type: 'tool_use', id: 'toolu_2', name: 'Read', input: {} },
+      ],
+    } as never,
+  })
+  // A subagent's row is not the session's end.
+  await $.session.append({
+    door: 'response',
+    origin: { kind: 'model' } as never,
+    uuid: 'sub1',
+    agentId: 'agent-1',
+    message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'sub' }] } as never,
+  })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'latest' })
+  // The kit's transcript lands nowhere: each row is tried, newest first, then the prompt.
+  const tried = calls.logs.filter(l => /could not scroll to the end of/.test(l)).map(l => /end of (\S+):/.exec(l)![1])
+  expect(tried).toEqual(['toolu_2', 'u1'])
+  expect(calls.scroll).toEqual(['u1'])
+  await ui.unmount()
+})
