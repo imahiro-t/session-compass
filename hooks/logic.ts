@@ -750,3 +750,203 @@ function numberedPrompts(prompts: readonly string[]): string {
     })
     .join('\n')
 }
+
+// ---------------------------------------------------------------------------
+// The band's width, shared with the summary above the question dialog.
+
+/** The band's navigation buttons. */
+export const BAND_BUTTONS = 4
+/** Cells one button takes on the terminal: `[ ⏫ ]`. */
+export const BUTTON_CELLS = 6
+/** Cells between two buttons (the row's `gap`). */
+export const BUTTON_GAP = 1
+/** Cells between the summary and the buttons (the row's `marginLeft`). */
+export const BUTTONS_MARGIN = 1
+/** Cells the whole button row takes, the margin before it included. */
+export const BUTTONS_WIDTH = BAND_BUTTONS * BUTTON_CELLS + (BAND_BUTTONS - 1) * BUTTON_GAP + BUTTONS_MARGIN
+
+/** Cells the engine keeps at the right of a site (its `[-]` mark): `bodyColumns` is the columns less these. */
+export const ENGINE_MARK_CELLS = 5
+/** Columns assumed where the surface has not measured its viewport. */
+export const DEFAULT_COLUMNS = 80
+
+/**
+ * The cells the summary is cut to on the band: its body less the buttons
+ * (and 🔁 in manual mode), 8 at least. The question dialog's summary is cut
+ * to the same.
+ */
+export function bandRoom(bodyColumns: number, canRefresh: boolean): number {
+  return Math.max(8, bodyColumns - BUTTONS_WIDTH - (canRefresh ? BUTTON_CELLS + BUTTON_GAP : 0))
+}
+
+/**
+ * The band's `bodyColumns` as a site without that prop (the question dialog)
+ * reckons it: the viewport's columns less the engine's right mark. Where a
+ * pane is docked beside the transcript it is an approximation.
+ */
+export function bodyColumnsOf(viewportColumns: number | undefined): number {
+  return (viewportColumns ?? DEFAULT_COLUMNS) - ENGINE_MARK_CELLS
+}
+
+// ---------------------------------------------------------------------------
+// Folding Claude's output.
+
+/** Cells the engine's reply bullet takes (`⏺ `). */
+const BULLET_CELLS = 2
+/** Cells the fold marker takes (`▼ `). */
+export const MARKER_CELLS = 2
+
+/**
+ * The cells an output block's text is drawn in beside the fold marker: the
+ * viewport less the reply bullet, the marker and the engine's right mark, 8
+ * at least. Both whether a block is folded and how it is cut use this width.
+ */
+export function foldColumns(viewportColumns: number | undefined): number {
+  return Math.max(8, (viewportColumns ?? DEFAULT_COLUMNS) - BULLET_CELLS - MARKER_CELLS - ENGINE_MARK_CELLS)
+}
+
+/**
+ * How many rows an output block takes at `columns` cells, wrapping counted:
+ * each line (trailing blank lines left out) its width over the columns,
+ * rounded up, an empty one a row. An approximation: the engine's markdown
+ * drawing (a heading's marks, a link's URL) changes the widths a little.
+ */
+export function outputRowCount(text: string, columns: number): number {
+  const width = Math.max(1, columns)
+  let rows = 0
+  for (const line of text.trimEnd().split('\n')) {
+    rows += Math.max(1, Math.ceil(textWidth(line) / width))
+  }
+  return rows
+}
+
+/** A line that opens or closes a code fence: its mark (` or ~), else null. */
+function fenceMark(line: string): string | null {
+  const m = /^(`{3,}|~{3,})/.exec(line)
+  return m === null ? null : m[1]!
+}
+
+/** A line that carries no text of its own: a table's rule, a rule, a setext underline, a comment. */
+function isRuleLine(line: string): boolean {
+  return (
+    line === '' ||
+    /^[|\-:\s]+$/.test(line) ||
+    /^(\*\s*){3,}$/.test(line) ||
+    /^(_\s*){3,}$/.test(line) ||
+    /^=+$/.test(line) ||
+    /^<!--.*-->$/.test(line)
+  )
+}
+
+/** Inline markdown marks dropped: links to their text, emphasis, strike, code. */
+function withoutInlineMarks(text: string): string {
+  return text
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<((?:https?|mailto):[^>\s]+)>/g, '$1')
+    .replace(/\*\*|__|~~/g, '')
+    .replace(/`+/g, '')
+    .replace(/\*(\S(?:[^*]*\S)?)\*/g, '$1')
+    .replace(/(^|[^\p{L}\p{N}])_(\S(?:[^_]*\S)?)_(?=[^\p{L}\p{N}]|$)/gu, '$1$2')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** A table row as its cells, ` / ` between them. */
+function tableRowText(line: string): string {
+  return line
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map(cell => withoutInlineMarks(cell))
+    .filter(cell => cell !== '')
+    .join(' / ')
+}
+
+/** A line's block marks dropped: headings, quotes, list items, task boxes. */
+function withoutBlockMarks(line: string): string {
+  let out = line
+  for (;;) {
+    const next = out.replace(/^(#{1,6}(\s+|$)|>\s?|[-*+]\s+|\d+[.)]\s+|\[[ xX]\]\s+)/, '').trimStart()
+    if (next === out) return out
+    out = next
+  }
+}
+
+/**
+ * The line a folded output block shows, as plain text: its first line with
+ * text of its own, block and inline marks dropped. Blank lines, fences,
+ * table and other rules, setext underlines and comments are passed over, and
+ * so is what is inside a fence, unless the block holds nothing else: then
+ * the fence's first line with text. Empty when there is none.
+ */
+export function foldLine(text: string): string {
+  let fence: string | null = null
+  let firstInFence: string | null = null
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    const mark = fenceMark(line)
+    if (fence !== null) {
+      if (mark !== null && mark[0] === fence[0] && mark.length >= fence.length && line.slice(mark.length).trim() === '') {
+        fence = null
+      } else if (firstInFence === null && line !== '') {
+        firstInFence = line
+      }
+      continue
+    }
+    if (mark !== null) {
+      fence = mark
+      continue
+    }
+    if (isRuleLine(line)) continue
+    const plain = line.startsWith('|') ? tableRowText(line) : withoutInlineMarks(withoutBlockMarks(line))
+    if (plain !== '') return plain
+  }
+  return firstInFence === null ? '' : firstInFence.replace(/\s+/g, ' ')
+}
+
+/** Every mark markdown reads, escaped, `\` first so none is escaped twice. */
+export function escapeMarkdown(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/[`*_~[\]<>#|&]/g, ch => `\\${ch}`)
+    .replace(/^([-+=])/, '\\$1')
+    .replace(/^(\d+)([.)])/, '$1\\$2')
+}
+
+/**
+ * The `text` a folded block hands the engine: `foldLine` cut to one row of
+ * `columns` cells, a `…` after it where the block goes on, every markdown
+ * mark escaped so the engine draws one closed paragraph. The width is the
+ * plain line's: an escape draws nothing. `…` alone where no line has text.
+ */
+export function foldedText(text: string, columns: number): string {
+  const line = foldLine(text)
+  if (line === '') return '…'
+  let shown = oneLine(line, columns)
+  const flat = line.replace(/\s+/g, ' ').trim()
+  const isCut = shown !== flat
+  if (!isCut && flat !== text.replace(/\s+/g, ' ').trim()) shown = oneLine(`${shown} …`, columns)
+  return escapeMarkdown(shown)
+}
+
+/** The folded blocks kept at most, the oldest dropped first. */
+export const FOLDED_KEPT = 200
+
+/** The folded ids with `id` folded or unfolded; null when that changes nothing. */
+export function withFold(folded: readonly string[], id: string, isFolded: boolean): string[] | null {
+  const has = folded.includes(id)
+  if (has === isFolded) return null
+  if (!isFolded) return folded.filter(f => f !== id)
+  const all = [...folded, id]
+  return all.length <= FOLDED_KEPT ? all : all.slice(all.length - FOLDED_KEPT)
+}
+
+/**
+ * The prompt a move lights: the one it landed on; for ⏬ landed at the end of
+ * the transcript (`landedId` null), the newest prompt; null where none is.
+ */
+export function highlightAfterMove(kind: NavKind, promptIds: readonly string[], landedId: string | null): string | null {
+  if (landedId !== null) return landedId
+  if (kind === 'latest') return promptIds[promptIds.length - 1] ?? null
+  return null
+}

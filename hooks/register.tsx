@@ -32,6 +32,15 @@ import {
   firstPromptRow,
   drawnRowIds,
   parseRows,
+  BUTTON_GAP,
+  BUTTONS_MARGIN,
+  bandRoom,
+  bodyColumnsOf,
+  foldColumns,
+  foldedText,
+  highlightAfterMove,
+  outputRowCount,
+  withFold,
 } from './logic'
 import type { NavKind, Viewport } from './logic'
 
@@ -39,10 +48,14 @@ const FIRST_PROMPT = { plugin: 'session-compass', key: 'firstPrompt' } as const
 const SUMMARY = { plugin: 'session-compass', key: 'summary' } as const
 const NAV = { plugin: 'session-compass', key: 'nav' } as const
 const PROMPTS = { plugin: 'session-compass', key: 'prompts' } as const
+const FOLDED = { plugin: 'session-compass', key: 'folded' } as const
+const HIGHLIGHT = { plugin: 'session-compass', key: 'highlightId' } as const
 
 const firstPromptAtom = atom(FIRST_PROMPT, null)
 const summaryAtom = atom(SUMMARY, { status: 'idle' })
 const navAtom = atom(NAV, EMPTY_NAV)
+const foldedAtom = atom(FOLDED, [] as string[])
+const highlightAtom = atom(HIGHLIGHT, null as string | null)
 
 const SUMMARY_SYSTEM =
   'あなたはセッションの要約を書く。番号順に並んだユーザーの依頼（1 番がセッション最初の依頼、以降は新しいもの）から、このセッションで今取り組んでいることを 1 行（全角 40 字程度）で要約する。話題が移っていれば新しい話題を中心に、全体の流れが分かるように書く。「これまでの要約」が添えられていれば、番号の飛んだ間の依頼も含めた流れの手がかりにするが、新しい依頼で話題が変わっていればそれに引きずられず書き直す。前置き・引用符・句点以外の記号は不要で、要約だけを出力する。'
@@ -55,20 +68,17 @@ const BUTTONS: readonly { kind: NavKind; label: string }[] = [
   { kind: 'latest', label: '⏬' },
 ]
 
-/** Cells one button takes on the terminal: `[ ⏫ ]`. */
-const BUTTON_CELLS = 6
-/** Cells between two buttons (the row's `gap`). */
-const BUTTON_GAP = 1
-/** Cells between the summary and the buttons (the row's `marginLeft`). */
-const BUTTONS_MARGIN = 1
-/** Cells the whole button row takes, the margin before it included. */
-const BUTTONS_WIDTH = BUTTONS.length * BUTTON_CELLS + (BUTTONS.length - 1) * BUTTON_GAP + BUTTONS_MARGIN
-
 /**
- * Cells the summary takes above the question dialog: under the 40 columns
- * the dialog counts as one row.
+ * The background of the prompt row the last button move landed on: a theme
+ * key, so it follows the light and dark themes and the row's text stays
+ * readable on it.
  */
-const QUESTION_COLUMNS = 39
+const HIGHLIGHT_BG = 'diffAddedDimmed'
+/**
+ * The one-cell strip drawn at the left of that row in the accent color: seen
+ * even where the engine paints the row's own background over the Box's.
+ */
+const HIGHLIGHT_STRIP = 'claude'
 
 /** Bytes of the transcript file's head ⏫ reads for the first prompt. */
 const HEAD_BYTES = 2_000_000
@@ -391,6 +401,7 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
       return
     }
     await setCursor($, target.id)
+    await setHighlight($, highlightAfterMove(kind, nav.promptIds, landed ? null : target.id))
     if (target.index === 0) await walkUp($, surface, target.id)
   } catch (error) {
     debug($, `navigation failed: ${String(error)}`)
@@ -479,6 +490,7 @@ async function toFirstOfFile($: Dollar, surface: string, nav: Nav): Promise<bool
     )
   }
   await setCursor($, first.id)
+  await setHighlight($, first.id)
   return true
 }
 
@@ -526,6 +538,8 @@ async function toEndOfFile($: Dollar, surface: string, nav: Nav): Promise<boolea
   }
   debug($, `latest lands on the end of ${last}, the transcript's last row${skipped > 0 ? ` drawn here (${skipped} newer not drawn)` : ''}`)
   await writeNav($, 'cursor', current => (current.cursorId === null ? null : { ...current, cursorId: null }))
+  const ids = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV).promptIds
+  await setHighlight($, highlightAfterMove('latest', ids, null))
   return true
 }
 
@@ -552,6 +566,32 @@ async function setCursor($: Dollar, id: string): Promise<void> {
     const current = withoutBadStops(stored)
     return current === stored && current.cursorId === id ? null : { ...current, cursorId: id }
   })
+}
+
+/**
+ * Writes which prompt row is lit (null: none), with one compare-and-set
+ * tried three times; a write that changes nothing is skipped.
+ */
+async function setHighlight($: Dollar, id: string | null): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const held = await $.state.get(HIGHLIGHT)
+    if ((held.value ?? null) === id) return
+    const written = await $.state.set(HIGHLIGHT, id, { ifVersion: held.version })
+    if (written.isSet) return
+  }
+  debug($, 'gave up writing the highlight: three writes lost the race')
+}
+
+/** Folds or unfolds one output block, by its id, with one compare-and-set tried three times. */
+async function setFold($: Dollar, id: string, isFolded: boolean): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const held = await $.state.get(FOLDED)
+    const next = withFold(held.value ?? [], id, isFolded)
+    if (next === null) return
+    const written = await $.state.set(FOLDED, next, { ifVersion: held.version })
+    if (written.isSet) return
+  }
+  debug($, `gave up ${isFolded ? 'folding' : 'unfolding'} ${id}: three writes lost the race`)
 }
 
 /** Scrolls a row into view; the reason when it did not move. */
@@ -608,7 +648,10 @@ async function walkUp($: Dollar, surface: string, from: string): Promise<void> {
     debug($, `could not scroll to the prompt: ${denied}`)
     return
   }
-  if (current !== from) await setCursor($, current)
+  if (current !== from) {
+    await setCursor($, current)
+    await setHighlight($, current)
+  }
 }
 
 export const register: Register = (on, options) => {
@@ -651,7 +694,11 @@ export const register: Register = (on, options) => {
       result.deny === undefined
     const { uuid } = e
     later($, 'session.append', async () => {
-      if (isOwn) await writeNav($, 'new prompt', nav => withLivePrompt(nav, uuid))
+      if (isOwn) {
+        await writeNav($, 'new prompt', nav => withLivePrompt(nav, uuid))
+        // Said something new: where the person is, is the end again.
+        await setHighlight($, null)
+      }
       await mergeBuffer($)
     })
     return result
@@ -679,25 +726,60 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     // Drawing may not write state: remember the row, merge it later.
     const { origin, task, from, text } = e.props
-    if (isStopId(e.requestId) && isOwnPrompt(origin, { task, from }) && text.trim() !== '') {
-      renderBuffer.set(e.requestId, promptKey(typedText(text)))
-      if ('onScreen' in e.props && e.props.onScreen !== undefined) {
-        noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, true, Date.now())
-      }
+    if (!(isStopId(e.requestId) && isOwnPrompt(origin, { task, from }) && text.trim() !== '')) return next(e)
+    renderBuffer.set(e.requestId, promptKey(typedText(text)))
+    if ('onScreen' in e.props && e.props.onScreen !== undefined) {
+      noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, true, Date.now())
     }
-    return next(e)
+    // The row a button move landed on is lit, so the person sees where it
+    // went. Read here, so a move to another prompt draws both rows again.
+    const highlightId = await read($, highlightAtom)
+    const row = await next(e)
+    if (highlightId !== e.requestId) return row
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box key="highlight" flexDirection="row" backgroundColor={HIGHLIGHT_BG}>
+        <Text backgroundColor={HIGHLIGHT_STRIP}> </Text>
+        <Box flexGrow={1} flexShrink={1}>
+          {row}
+        </Box>
+      </Box>
+    )
   })
 
   // Reply rows tell which way the viewport moves, so a prompt row that jumps
   // out of view whole is known to be above it or below it.
-  on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     if ('onScreen' in e.props && e.props.onScreen !== undefined) {
       noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, false, Date.now())
     }
-    return next(e)
+    // A block of more than one row gets a marker that folds it to its first
+    // line; a one-row block is drawn as it is, and reads no state.
+    const columns = foldColumns(e.viewport?.columns)
+    if (!isStopId(e.requestId) || outputRowCount(e.props.text, columns) < 2) return next(e)
+    const isFolded = (await read($, foldedAtom)).includes(e.requestId)
+    // The engine draws the body either way, in its own colors: folded, from
+    // a rewritten text (`isSummary` and `onScreen` carried on untouched).
+    const body = await next(isFolded ? { ...e, props: { ...e.props, text: foldedText(e.props.text, columns) } } : e)
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const id = e.requestId
+    return (
+      <Box flexDirection="row">
+        <Box flexShrink={0} marginRight={1}>
+          <Button key="fold" plain onPress={() => setFold($, id, !isFolded).catch(error => debug($, `fold failed: ${String(error)}`))}>
+            <Text color="claude" weight="bold">
+              {isFolded ? '▶' : '▼'}
+            </Text>
+          </Button>
+        </Box>
+        <Box flexGrow={1} flexShrink={1}>
+          {body}
+        </Box>
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
@@ -719,20 +801,21 @@ export const register: Register = (on, options) => {
   })
 
   // The question dialog takes the prompt's place, the band with it: the
-  // summary goes above the dialog instead, on one row (the dialog
-  // counts each 40 columns a row, its tree held to 12 on the terminal), with
-  // no buttons.
+  // summary goes above the dialog instead, on one row, cut to the same width
+  // as on the band (the dialog has no `bodyColumns`: the viewport's columns
+  // less the engine's right mark stand for it), with no buttons.
   on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
     const dialog = await next(e)
     const firstPrompt = await read($, firstPromptAtom)
     const summary = await read($, summaryAtom)
     const { Box, Text } = $.ui.resolve(e)
-    const band = bandText(firstPrompt, summary, QUESTION_COLUMNS)
+    const room = bandRoom(bodyColumnsOf(e.viewport?.columns), summaryMode === 'manual')
+    const band = bandText(firstPrompt, summary, room)
     if (band.kind === 'empty') return dialog
     // No dim note here: the row is the summary's alone.
     const line = (
       <Text wrap="truncate-end" color="claude" weight="bold">
-        {band.kind === 'pending' ? bandText(firstPrompt, { status: 'idle' }, QUESTION_COLUMNS).text : band.text}
+        {band.kind === 'pending' ? bandText(firstPrompt, { status: 'idle' }, room).text : band.text}
       </Text>
     )
     return (
@@ -752,7 +835,7 @@ export const register: Register = (on, options) => {
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const canRefresh = summaryMode === 'manual'
-    const room = Math.max(8, e.props.bodyColumns - BUTTONS_WIDTH - (canRefresh ? BUTTON_CELLS + BUTTON_GAP : 0))
+    const room = bandRoom(e.props.bodyColumns, canRefresh)
     const hasPrompts = nav.promptIds.length > 0
 
     const band = bandText(firstPrompt, summary, room)

@@ -46,6 +46,10 @@ declare module 'claude-code' {
       nav: Nav
       /** The person's prompts, each cut short: the first and the newest ones. */
       prompts: string[]
+      /** The ids of the output blocks folded (`AssistantMessage` rows); every other is open. */
+      folded: string[]
+      /** The prompt the last button move landed on, drawn lit; null when none is. */
+      highlightId: string | null
     }
   }
 }

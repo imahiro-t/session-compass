@@ -19,10 +19,18 @@ A Claude Code plugin that adds a band above the prompt. Its left side tells you 
 - 🔼 and 🔽 go one prompt back and forward. Only your own prompts are stops, slash commands included: notifications, messages from other agents and the like are not. A move puts the prompt's row at the top of the transcript.
 - ⏫ goes to the very first prompt of the session, and ⏬ to the very end of the transcript (the line that closes the last turn, or the newest row). Both read the session's transcript file for it, so they reach rows far off screen that the band has never seen drawn, in a long or resumed session too.
 - If you scroll the transcript yourself, the buttons count from what you are reading: 🔼 goes back to the start of the prompt whose reply is on screen, 🔽 on to the next one. Until you scroll, they count from where the last button left you.
+- The prompt row a button lands on gets a background colour (the theme's `diffAddedDimmed`, with a one-cell strip in the `claude` colour at its left), so you can see where you went. Moving to another prompt moves the colour with you, and sending a new prompt clears it. When ⏬ lands at the very end of the transcript, the newest prompt's row is the one coloured; it is not necessarily on screen then (a long latest reply pushes it above the window).
 
 ### While Claude asks you a question (AskUserQuestion)
 
-The question dialog takes the prompt's place, and the band with it. The summary then shows on one row above the dialog, cut to fit (the dialog's rows are limited), without the buttons.
+The question dialog takes the prompt's place, and the band with it. The summary then shows on one row above the dialog, cut to the same width as on the band (so it shows as many characters as the band would at that window width), without the buttons. The dialog has no body width of its own to read, so the band's is reckoned from the window's columns; with a pane docked beside the transcript it can differ from the band's by a few cells.
+
+### Folding Claude's output
+
+- Each block of Claude's output that takes more than one row (wrapping counted: one long paragraph counts too) gets a marker at its left: `▼` while it is open, `▶` while it is folded. A block of one row gets none.
+- Every block starts open. Click the marker to fold the block, and again to open it. The marker is drawn bold in the theme's `claude` colour; the output itself keeps Claude Code's own colours and drawing.
+- A folded block shows one row: its first line of text, without markdown decoration, cut to the window's width, with `…` when there is more. A block that starts with a code fence or a table shows its first line of prose (a table, its header cells), not the code or the table rules; a block that is only code shows the code's first line.
+- Only the text blocks of Claude's replies fold. Tool calls and their results are not touched (Claude Code folds those itself with ctrl+o).
 
 ### What is sent, and when
 
@@ -69,6 +77,10 @@ Change it in `/config`, or in your settings:
 
 ## Known limitations
 
+- Folding and the highlight work in fullscreen mode (and on remote surfaces that redraw transcript rows). In the main, non-fullscreen screen, rows already written to the terminal's scrollback are never drawn again, so a fold or a highlight does not show there; the buttons' moves need fullscreen anyway.
+- The fold marker is pressed with a click (the mouse) only: buttons inside the transcript cannot take the keyboard focus, so there is no key for it.
+- Whether a block takes more than one row is reckoned from its plain text width, so where markdown changes the drawn width (a heading's marks, a link's URL) a block right at one row may get a marker; folding it then simply shows the same single row.
+- The fold state is kept by each block's message id. A block drawn under a temporary id while it streams may open again once it has its own.
 - Claude Code's own header at the top of the transcript, which names the prompt you are reading while you scroll, can name the prompt before the one 🔽 moved to. The header is Claude Code's, not this plugin's, and the plugin leaves it alone.
 
 ## Development

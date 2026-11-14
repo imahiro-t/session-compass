@@ -37,6 +37,17 @@ import {
   withPastPrompts,
   withPrompt,
   withoutBadStops,
+  BUTTONS_WIDTH,
+  FOLDED_KEPT,
+  bandRoom,
+  bodyColumnsOf,
+  escapeMarkdown,
+  foldColumns,
+  foldLine,
+  foldedText,
+  highlightAfterMove,
+  outputRowCount,
+  withFold,
 } from '../hooks/logic'
 import type { Seen } from '../hooks/logic'
 
@@ -544,5 +555,167 @@ describe('the transcript file', () => {
   test('a turn\'s closing line comes first: one row high, its end reaches the bottom', () => {
     const ended = `${text}\n${JSON.stringify({ type: 'system', subtype: 'turn_duration', uuid: 'd1', durationMs: 3000 })}\n${JSON.stringify({ type: 'last-prompt' })}`
     expect(drawnRowIds(parseRows(ended), 3)).toEqual(['d1', 'toolu_9', 'a1'])
+  })
+})
+
+describe('bandRoom', () => {
+  test('the body less the four buttons, and 🔁 in manual mode', () => {
+    // [ ⏫ ] x4 with three gaps and the margin: 6*4 + 3 + 1.
+    expect(BUTTONS_WIDTH).toBe(28)
+    expect(bandRoom(80, false)).toBe(52)
+    expect(bandRoom(80, true)).toBe(45)
+    expect(bandRoom(20, false)).toBe(8)
+  })
+  test('a site with no bodyColumns reckons it from the viewport, 80 columns when unmeasured', () => {
+    expect(bodyColumnsOf(120)).toBe(115)
+    expect(bodyColumnsOf(undefined)).toBe(75)
+  })
+})
+
+describe('foldColumns', () => {
+  test('the viewport less the bullet, the marker and the engine\'s right mark', () => {
+    expect(foldColumns(100)).toBe(91)
+    expect(foldColumns(undefined)).toBe(71)
+    expect(foldColumns(10)).toBe(8)
+  })
+})
+
+describe('outputRowCount', () => {
+  test('counts lines and the rows a long one wraps to', () => {
+    expect(outputRowCount('one line', 40)).toBe(1)
+    expect(outputRowCount('one\ntwo', 40)).toBe(2)
+    expect(outputRowCount('one\n\nthree', 40)).toBe(3)
+    expect(outputRowCount('trailing newline\n\n', 40)).toBe(1)
+    expect(outputRowCount('x'.repeat(40), 40)).toBe(1)
+    expect(outputRowCount('x'.repeat(41), 40)).toBe(2)
+    expect(outputRowCount('x'.repeat(130), 40)).toBe(4)
+  })
+  test('wide characters take two cells', () => {
+    expect(outputRowCount('あ'.repeat(20), 40)).toBe(1)
+    expect(outputRowCount('あ'.repeat(21), 40)).toBe(2)
+  })
+})
+
+describe('foldLine', () => {
+  test('passes over blank lines and drops a heading\'s marks', () => {
+    expect(foldLine('\n\n## The plan\nbody')).toBe('The plan')
+  })
+  test('starting with a code fence, it is the first line of text after the fence', () => {
+    expect(foldLine('```ts\nconst a = 1\n```\nThat sets a.')).toBe('That sets a.')
+    expect(foldLine('~~~\ncode\n~~~\nafter')).toBe('after')
+  })
+  test('a block that is only a fence shows the fence\'s first line, never its opener', () => {
+    expect(foldLine('```ts\n\nconst a = 1\nconst b = 2\n```')).toBe('const a = 1')
+  })
+  test('a table shows its header row as cells, its rule passed over', () => {
+    expect(foldLine('| Name | **Size** |\n|---|:--:|\n| a | 1 |')).toBe('Name / Size')
+    expect(foldLine('|---|---|\n| a | b |')).toBe('a / b')
+  })
+  test('rules, setext underlines and comments are passed over', () => {
+    expect(foldLine('---\n***\n___\n<!-- note -->\nTitle\n=====')).toBe('Title')
+    expect(foldLine('===\nnext')).toBe('next')
+  })
+  test('quotes, list items and task boxes lose their marks', () => {
+    expect(foldLine('> > quoted')).toBe('quoted')
+    expect(foldLine('- item')).toBe('item')
+    expect(foldLine('* item')).toBe('item')
+    expect(foldLine('+ item')).toBe('item')
+    expect(foldLine('1. first')).toBe('first')
+    expect(foldLine('2) second')).toBe('second')
+    expect(foldLine('- [x] done')).toBe('done')
+    expect(foldLine('- [ ] todo')).toBe('todo')
+  })
+  test('inline marks are dropped, a link keeps its text', () => {
+    expect(foldLine('**Bold** and __strong__, *em* and _em_, ~~gone~~ and `code`')).toBe('Bold and strong, em and em, gone and code')
+    expect(foldLine('See [the docs](https://example.com/x) now')).toBe('See the docs now')
+    expect(foldLine('snake_case_name stays')).toBe('snake_case_name stays')
+  })
+  test('nothing with text is empty', () => {
+    expect(foldLine('\n---\n')).toBe('')
+  })
+})
+
+/** The plain text an escaped folded line draws as. */
+function unescape(text: string): string {
+  return text.replace(/\\(.)/g, '$1')
+}
+
+describe('foldedText', () => {
+  const inputs = [
+    'This reply is one long paragraph with no newline in it, going on and on for a good while longer than a row.',
+    'これは改行のない長い日本語の段落で、画面の幅よりずっと長く続き、折りたたむと一行に切られるはずの文章です。',
+    'First line\nsecond line\nthird line',
+    '```ts\nconst a = 1\n```\nThen *a* is `1`.',
+    '| a | b |\n|---|---|\n| 1 | 2 |',
+    '# Heading\n\n- [link](u) with <tag> & `code` | pipe ~ tilde',
+  ]
+  for (const columns of [40, 80]) {
+    test(`fits one row of ${columns} cells, whatever the block`, () => {
+      for (const input of inputs) {
+        const out = foldedText(input, columns)
+        const plain = unescape(out)
+        expect(out.includes('\n')).toBe(false)
+        expect(textWidth(plain)).toBeLessThanOrEqual(columns)
+        expect(outputRowCount(plain, columns)).toBe(1)
+      }
+    })
+  }
+  test('a … says the block goes on', () => {
+    expect(foldedText('short\nmore below', 40)).toBe('short …')
+    expect(unescape(foldedText('x'.repeat(100), 40)).endsWith('…')).toBe(true)
+    // No room for ` …`: the line is cut a cell short instead.
+    const tight = unescape(foldedText(`${'y'.repeat(40)}\nmore`, 40))
+    expect(tight.endsWith('…')).toBe(true)
+    expect(textWidth(tight)).toBeLessThanOrEqual(40)
+  })
+  test('every markdown mark left is escaped', () => {
+    const out = foldedText('# Head\n\nthe *a* [b] <c> # d | e ~ f & g _h_ \\ i `j`', 80)
+    expect(out).toBe('Head …')
+    const marks = foldedText('a*b [c] <d> #e |f ~g &amp; h\\i\nmore', 80)
+    expect(marks).toBe('a\\*b \\[c\\] \\<d\\> \\#e \\|f \\~g \\&amp; h\\\\i …')
+  })
+  test('a line starting with a block mark is escaped at its start', () => {
+    expect(escapeMarkdown('- a')).toBe('\\- a')
+    expect(escapeMarkdown('+ a')).toBe('\\+ a')
+    expect(escapeMarkdown('# a')).toBe('\\# a')
+    expect(escapeMarkdown('> a')).toBe('\\> a')
+    expect(escapeMarkdown('12. a')).toBe('12\\. a')
+    expect(escapeMarkdown('3) a')).toBe('3\\) a')
+    // `\` is escaped first, so nothing is escaped twice.
+    expect(escapeMarkdown('\\*')).toBe('\\\\\\*')
+  })
+  test('nothing with text folds to … alone', () => {
+    expect(foldedText('---\n\n---', 40)).toBe('…')
+  })
+})
+
+describe('withFold', () => {
+  test('folds, unfolds, and says when nothing changes', () => {
+    expect(withFold([], 'a', true)).toEqual(['a'])
+    expect(withFold(['a', 'b'], 'a', false)).toEqual(['b'])
+    expect(withFold(['a'], 'a', true)).toBeNull()
+    expect(withFold([], 'a', false)).toBeNull()
+  })
+  test('keeps the newest FOLDED_KEPT, the oldest dropped first', () => {
+    const many = Array.from({ length: FOLDED_KEPT }, (_, i) => `r${i}`)
+    const out = withFold(many, 'new', true)!
+    expect(out.length).toBe(FOLDED_KEPT)
+    expect(out[0]).toBe('r1')
+    expect(out[out.length - 1]).toBe('new')
+  })
+})
+
+describe('highlightAfterMove', () => {
+  const ids = ['u1', 'u2', 'u3']
+  test('each button lights the prompt it landed on', () => {
+    expect(highlightAfterMove('first', ids, 'u1')).toBe('u1')
+    expect(highlightAfterMove('prev', ids, 'u2')).toBe('u2')
+    expect(highlightAfterMove('next', ids, 'u3')).toBe('u3')
+    expect(highlightAfterMove('latest', ids, 'u3')).toBe('u3')
+  })
+  test('⏬ at the end of the transcript lights the newest prompt, none where there is none', () => {
+    expect(highlightAfterMove('latest', ids, null)).toBe('u3')
+    expect(highlightAfterMove('latest', [], null)).toBeNull()
+    expect(highlightAfterMove('prev', ids, null)).toBeNull()
   })
 })
