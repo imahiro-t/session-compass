@@ -1,7 +1,7 @@
 {
   "name": "session-compass",
-  "version": "0.3.0",
-  "description": "Session Compass: a band above the Claude Code prompt that tells what the session is about (a one-line summary of your prompts so far, made again after each prompt or on 🔁) and has buttons to step back and forth through your prompts; the summary shows above Claude's question dialog too, at the band's width; multi-row output blocks fold with a ▼/▶ marker or all at once with 📖/📕 on the band, and the prompt a button lands on is marked with ▌",
+  "version": "0.4.0",
+  "description": "Session Compass: a band above the Claude Code prompt that tells what the session is about (a one-line summary of your prompts so far, made again after each prompt or on 🔁) and has buttons to step back and forth through your prompts; the summary shows above Claude's question dialog too, at the band's width; output blocks fold with a ▼/▶ marker or all at once with 📖/📕 on the band, and the prompt a button lands on is marked with ▌",
   "author": {
     "name": "Takashi Imahiro"
   },

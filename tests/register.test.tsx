@@ -835,23 +835,24 @@ async function drawReply($: Engine, requestId: string, text: string, columns?: n
   })
 }
 
-test('a one-row output block has no fold marker and is the engine\'s alone', async ($, on) => {
+test('a one-row output block gets a fold marker too, and folds to the same row', async ($, on) => {
   engine(on)
   const texts = replyEngine(on)
   const ui = await drawReply($, 'a1', 'Done.', 80)
-  expect(await ui.find({ type: 'Button' })).toBeUndefined()
-  expect(await ui.drawn()).toMatchObject({ type: 'engine' })
-  expect(texts).toEqual(['Done.'])
+  expect((await ui.find({ key: 'fold' }))?.text).toBe('▼')
+  expect(texts[texts.length - 1]).toBe('Done.')
+  await ui.press({ key: 'fold' })
+  expect((await ui.find({ key: 'fold' }))?.text).toBe('▶')
+  expect(texts[texts.length - 1]).toBe(foldedText('Done.', foldColumns(80)))
   await ui.unmount()
 })
 
-test('a one-row block after blank lines gets no marker either', async ($, on) => {
+test('a one-row block after blank lines gets a marker as well', async ($, on) => {
   engine(on)
   replyEngine(on)
   for (const [id, text] of [['a1', '\n\nDone.'], ['a2', '  \nDone.']] as const) {
     const ui = await drawReply($, id, text, 80)
-    expect(await ui.find({ type: 'Button' })).toBeUndefined()
-    expect(await ui.drawn()).toMatchObject({ type: 'engine' })
+    expect((await ui.find({ key: 'fold' }))?.text).toBe('▼')
     await ui.unmount()
   }
 })

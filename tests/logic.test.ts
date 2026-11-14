@@ -47,7 +47,6 @@ import {
   foldLine,
   foldedText,
   highlightAfterMove,
-  outputRowCount,
   withFold,
   withAllFolded,
   isFoldedIn,
@@ -585,26 +584,6 @@ describe('foldColumns', () => {
   })
 })
 
-describe('outputRowCount', () => {
-  test('counts lines and the rows a long one wraps to', () => {
-    expect(outputRowCount('one line', 40)).toBe(1)
-    expect(outputRowCount('one\ntwo', 40)).toBe(2)
-    expect(outputRowCount('one\n\nthree', 40)).toBe(3)
-    expect(outputRowCount('trailing newline\n\n', 40)).toBe(1)
-    // Blank lines before the text are not drawn either.
-    expect(outputRowCount('\n\nDone.', 40)).toBe(1)
-    expect(outputRowCount('  \nDone.', 40)).toBe(1)
-    expect(outputRowCount('\n\none\ntwo', 40)).toBe(2)
-    expect(outputRowCount('x'.repeat(40), 40)).toBe(1)
-    expect(outputRowCount('x'.repeat(41), 40)).toBe(2)
-    expect(outputRowCount('x'.repeat(130), 40)).toBe(4)
-  })
-  test('wide characters take two cells', () => {
-    expect(outputRowCount('あ'.repeat(20), 40)).toBe(1)
-    expect(outputRowCount('あ'.repeat(21), 40)).toBe(2)
-  })
-})
-
 describe('foldLine', () => {
   test('passes over blank lines and drops a heading\'s marks', () => {
     expect(foldLine('\n\n## The plan\nbody')).toBe('The plan')
@@ -665,7 +644,6 @@ describe('foldedText', () => {
         const plain = unescape(out)
         expect(out.includes('\n')).toBe(false)
         expect(textWidth(plain)).toBeLessThanOrEqual(columns)
-        expect(outputRowCount(plain, columns)).toBe(1)
       }
     })
   }

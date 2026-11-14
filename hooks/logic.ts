@@ -809,26 +809,10 @@ export const MARKER_CELLS = 2
 /**
  * The cells an output block's text is drawn in beside the fold marker: the
  * viewport less the reply bullet, the marker and the engine's right mark, 8
- * at least. Both whether a block is folded and how it is cut use this width.
+ * at least. A folded block is cut to this width.
  */
 export function foldColumns(viewportColumns: number | undefined): number {
   return Math.max(8, (viewportColumns ?? DEFAULT_COLUMNS) - BULLET_CELLS - MARKER_CELLS - ENGINE_MARK_CELLS)
-}
-
-/**
- * How many rows an output block takes at `columns` cells, wrapping counted:
- * each line (blank lines before and after left out, as the engine draws
- * none) its width over the columns,
- * rounded up, an empty one a row. An approximation: the engine's markdown
- * drawing (a heading's marks, a link's URL) changes the widths a little.
- */
-export function outputRowCount(text: string, columns: number): number {
-  const width = Math.max(1, columns)
-  let rows = 0
-  for (const line of text.trim().split('\n')) {
-    rows += Math.max(1, Math.ceil(textWidth(line) / width))
-  }
-  return rows
 }
 
 /** A line that opens or closes a code fence: its mark (` or ~), else null. */
