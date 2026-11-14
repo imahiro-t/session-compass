@@ -2,13 +2,14 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, PromptOrigin } from 'claude-code'
 import type { Nav } from '../types'
-import { oneLine, textWidth } from '../hooks/logic'
+import { bandRoom, foldColumns, foldedText, oneLine, textWidth } from '../hooks/logic'
 
 const BAND = {
   plugin: 'session-compass',
   component: 'AbovePrompt',
   props: {
     hasSurvey: false,
+    isCollapsed: false,
     isWorking: false,
     maxRows: 10,
     bodyColumns: 80,
@@ -95,14 +96,14 @@ async function say(
   })
 }
 
-test('with no prompt yet the band draws a placeholder and four buttons', async ($, on) => {
+test('with no prompt yet the band draws a placeholder, the fold-all toggle and four buttons', async ($, on) => {
   const { clock } = engine(on)
   await start($)
   await clock.settle()
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
     expect((await ui.find({ type: 'Text', text: /まだプロンプトがありません/ }))).toBeDefined()
-    for (const key of ['first', 'prev', 'next', 'latest']) {
+    for (const key of ['foldAll', 'first', 'prev', 'next', 'latest']) {
       expect(await ui.find({ key })).toBeDefined()
     }
     // Pressing any button with nothing to go to throws nothing and scrolls nothing.
@@ -659,22 +660,46 @@ async function drawQuestion($: Engine) {
   })
 }
 
-test('the summary shows above the question dialog, cut to one row', async ($, on) => {
-  const { clock } = engine(on, { isAnswered: true, text: 'ログイン画面のエラーを直して、テストを追加し、リリース手順を整える' })
+const LONG_SUMMARY =
+  'ログイン画面のエラーを直して、テストを追加し、リリース手順を整え、ドキュメントの英語版と日本語版を両方とも更新して、最後にバージョンを上げる'
+
+/** The question dialog, drawn over the engine's own node, at a viewport of `columns` when given. */
+async function drawQuestionAt($: Engine, columns?: number) {
+  return $.ui.mount({
+    plugin: 'session-compass',
+    surface: 'terminal',
+    component: 'AskUserQuestion',
+    requestId: 'toolu_1',
+    props: { tool: 'AskUserQuestion', questions: [{ question: 'どちらにしますか？' }] },
+    ...(columns === undefined ? {} : { viewport: { columns, rows: 40 } as never }),
+  })
+}
+
+test('the summary above the question dialog is cut to the band\'s own width, on one row', async ($, on) => {
+  const { clock } = engine(on, { isAnswered: true, text: LONG_SUMMARY })
   questionEngine(on)
   await start($)
   await say($, 'u1', 'ログイン画面でエラーになるバグを直してほしい')
   await clock.settle()
+  for (const columns of [80, 120] as const) {
+    // The band at the body columns the same viewport gives it.
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: columns - 5 } })
+    const bandLine = (await band.find({ type: 'Text', text: /^ログイン画面のエラー/ }))?.text
+    await band.unmount()
+    const ui = await drawQuestionAt($, columns)
+    const line = await ui.find({ type: 'Text', text: /^ログイン画面のエラー/ })
+    expect(line?.text).toBe(oneLine(LONG_SUMMARY, bandRoom(columns - 5, false)))
+    expect(line?.text).toBe(bandLine)
+    // Not the 39 cells the dialog used to be given (at 80 columns the band's own room is about that now).
+    if (columns === 120) expect(textWidth(line!.text)).toBeGreaterThan(39)
+    expect(line?.props.wrap).toBe('truncate-end')
+    expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await ui.unmount()
+  }
+  // Where the surface has not measured, 80 columns are assumed.
   const ui = await drawQuestion($)
-  const line = await ui.find({ type: 'Text', text: /^ログイン画面のエラー/ })
-  expect(line).toBeDefined()
-  expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
-  // One row of the dialog's 40 columns: 39 cells at most.
-  const cutText = oneLine('ログイン画面のエラーを直して、テストを追加し、リリース手順を整える', 39)
-  expect(textWidth(cutText)).toBeLessThanOrEqual(39)
-  expect(cutText.endsWith('…')).toBe(true)
-  expect(await ui.find({ type: 'Text', text: cutText })).toBeDefined()
-  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^ログイン画面のエラー/ }))?.text).toBe(oneLine(LONG_SUMMARY, bandRoom(75, false)))
   await ui.unmount()
 })
 
@@ -787,4 +812,240 @@ test('⏬ goes to the end of the newest row, its last tool call\'s for a reply, 
   expect(tried).toEqual(['toolu_2', 'u1'])
   expect(calls.scroll).toEqual(['u1'])
   await ui.unmount()
+})
+
+/** The engine's own drawing of an output block, beneath the plugin: the texts it was handed, in order. */
+function replyEngine(on: On): string[] {
+  const texts: string[] = []
+  on('ui.render', { component: 'AssistantMessage' }, (_, e) => {
+    texts.push(e.props.text)
+    return { type: 'engine', ref: 0 } as never
+  })
+  return texts
+}
+
+async function drawReply($: Engine, requestId: string, text: string, columns?: number) {
+  return $.ui.mount({
+    plugin: 'session-compass',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    requestId,
+    props: { text, isFirstOfReply: true },
+    ...(columns === undefined ? {} : { viewport: { columns, rows: 40 } as never }),
+  })
+}
+
+test('a one-row output block has no fold marker and is the engine\'s alone', async ($, on) => {
+  engine(on)
+  const texts = replyEngine(on)
+  const ui = await drawReply($, 'a1', 'Done.', 80)
+  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  expect(await ui.drawn()).toMatchObject({ type: 'engine' })
+  expect(texts).toEqual(['Done.'])
+  await ui.unmount()
+})
+
+test('a one-row block after blank lines gets no marker either', async ($, on) => {
+  engine(on)
+  replyEngine(on)
+  for (const [id, text] of [['a1', '\n\nDone.'], ['a2', '  \nDone.']] as const) {
+    const ui = await drawReply($, id, text, 80)
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    expect(await ui.drawn()).toMatchObject({ type: 'engine' })
+    await ui.unmount()
+  }
+})
+
+test('a block of several lines opens unfolded under ▼, and the marker folds and unfolds it', async ($, on) => {
+  engine(on)
+  const texts = replyEngine(on)
+  const text = '## Plan\n\n1. **Fix** the `login` bug\n2. Add tests\n\n```ts\nconst a = 1\n```'
+  const ui = await drawReply($, 'a1', text, 100)
+  expect((await ui.find({ key: 'fold' }))?.text).toBe('▼')
+  // The marker is drawn in the accent color; the body is the engine's, its colors untouched.
+  const marker = await ui.find({ type: 'Text', text: '▼' })
+  expect(marker?.props.color).toBe('claude')
+  // On the terminal the marker drops past the blank row above the block, onto its first line.
+  const markerBox = (await ui.findAll({ type: 'Box' })).find(el => el.props.marginTop !== undefined)
+  expect(markerBox?.props.marginTop).toBe(1)
+  // The control is named by what a press does, the state it is in told by that name.
+  expect((await ui.find({ key: 'fold' }))?.props.label).toBe('Fold output')
+  expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
+  expect(texts[texts.length - 1]).toBe(text)
+  await ui.press({ key: 'fold' })
+  expect((await ui.find({ key: 'fold' }))?.text).toBe('▶')
+  expect((await ui.find({ key: 'fold' }))?.props.label).toBe('Expand output')
+  expect(texts[texts.length - 1]).toBe(foldedText(text, foldColumns(100)))
+  expect(texts[texts.length - 1]).toBe('Plan …')
+  await ui.press({ key: 'fold' })
+  expect((await ui.find({ key: 'fold' }))?.text).toBe('▼')
+  expect(texts[texts.length - 1]).toBe(text)
+  // No Box or Text around the body sets a color.
+  const colored = (await ui.findAll({})).filter(el => el.type !== 'Text' && el.props.color !== undefined)
+  expect(colored).toEqual([])
+  await ui.unmount()
+})
+
+test('one long paragraph that wraps gets a marker too, and folds to a single row', async ($, on) => {
+  engine(on)
+  const texts = replyEngine(on)
+  const text = 'This reply is one long paragraph with no newline in it at all, '.repeat(4).trim()
+  const ui = await drawReply($, 'a1', text, 60)
+  expect(await ui.find({ key: 'fold' })).toBeDefined()
+  await ui.press({ key: 'fold' })
+  const folded = texts[texts.length - 1]!
+  expect(folded).not.toBe(text)
+  expect(folded).toBe(foldedText(text, foldColumns(60)))
+  expect(textWidth(folded)).toBeLessThanOrEqual(foldColumns(60))
+  expect(folded.endsWith('…')).toBe(true)
+  await ui.unmount()
+})
+
+test('the folded state is kept per block: another block stays open', async ($, on) => {
+  engine(on)
+  replyEngine(on)
+  const one = await drawReply($, 'a1', 'one\ntwo', 80)
+  await one.press({ key: 'fold' })
+  expect((await one.find({ key: 'fold' }))?.text).toBe('▶')
+  const other = await drawReply($, 'a2', 'three\nfour', 80)
+  expect((await other.find({ key: 'fold' }))?.text).toBe('▼')
+  await one.unmount()
+  await other.unmount()
+})
+
+test('the band\'s book folds every block and opens them again, a marker still turning its own', async ($, on) => {
+  engine(on)
+  replyEngine(on)
+  await start($)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const one = await drawReply($, 'a1', 'one\ntwo', 80)
+  const other = await drawReply($, 'a2', 'three\nfour', 80)
+  await one.press({ key: 'fold' })
+  expect((await band.find({ key: 'foldAll' }))?.props.label).toBe('📖')
+
+  await band.press({ key: 'foldAll' })
+  expect((await band.find({ key: 'foldAll' }))?.props.label).toBe('📕')
+  await one.redraw()
+  await other.redraw()
+  expect((await one.find({ key: 'fold' }))?.text).toBe('▶')
+  expect((await other.find({ key: 'fold' }))?.text).toBe('▶')
+  // A block drawn after it folds too.
+  const later = await drawReply($, 'a3', 'five\nsix', 80)
+  expect((await later.find({ key: 'fold' }))?.text).toBe('▶')
+  // A marker opens its own block alone.
+  await other.press({ key: 'fold' })
+  expect((await other.find({ key: 'fold' }))?.text).toBe('▼')
+  await one.redraw()
+  expect((await one.find({ key: 'fold' }))?.text).toBe('▶')
+
+  await band.press({ key: 'foldAll' })
+  expect((await band.find({ key: 'foldAll' }))?.props.label).toBe('📖')
+  for (const ui of [one, other, later]) {
+    await ui.redraw()
+    expect((await ui.find({ key: 'fold' }))?.text).toBe('▼')
+  }
+  for (const ui of [band, one, other, later]) await ui.unmount()
+})
+
+/** A prompt row drawn over the engine's own node, mounted until the test lets it go. */
+async function mountRow($: Engine, requestId: string, text: string) {
+  return $.ui.mount({
+    plugin: 'session-compass',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId,
+    props: { text, origin: COMPOSER, isExpanded: false },
+  })
+}
+
+async function isLit(row: { find: (q: { type?: string; text?: string }) => Promise<unknown> }) {
+  return (await row.find({ type: 'Text', text: '▌' })) !== undefined
+}
+
+/** A versioned store under `state.get` / `state.set`, as the engine keeps the plugin's state. */
+function versionedStore(on: On, initial: Record<string, unknown> = {}) {
+  const store = new Map<string, { value: unknown; version: number }>(
+    Object.entries(initial).map(([key, value]) => [key, { value, version: 1 }]),
+  )
+  on('state.get', (_, e) => ({ value: store.get(e.key) ?? { value: undefined, version: 0 } }) as never)
+  on('state.set', (_, e) => {
+    const held = store.get(e.key) ?? { value: undefined, version: 0 }
+    if (e.ifVersion !== undefined && e.ifVersion !== held.version) {
+      return { value: { isSet: false, version: held.version } }
+    }
+    const written = { value: e.value, version: held.version + 1 }
+    store.set(e.key, written)
+    return { value: { isSet: true, version: written.version } }
+  })
+  return store
+}
+
+test('the lit prompt row has a ▌ mark on its first line, and the light follows to the next prompt lit', async ($, on) => {
+  const { clock } = engine(on)
+  const store = versionedStore(on)
+  // What a move that landed writes (the kit's transcript never lands a scroll).
+  const light = async (id: string | null) => {
+    const held = store.get('highlightId')
+    store.set('highlightId', { value: id, version: (held?.version ?? 0) + 1 })
+    for (const row of Object.values(rows)) await row.redraw()
+  }
+  on('ui.render', { component: 'UserMessage' }, () => ({ type: 'engine', ref: 0 }) as never)
+  await start($)
+  await say($, 'u1', 'one')
+  await say($, 'u2', 'two')
+  await say($, 'u3', 'three')
+  await clock.settle()
+  const rows = { u1: await mountRow($, 'u1', 'one'), u2: await mountRow($, 'u2', 'two'), u3: await mountRow($, 'u3', 'three') }
+  const lit = async () => {
+    const out: string[] = []
+    for (const [id, row] of Object.entries(rows)) {
+      await row.redraw()
+      if (await isLit(row as never)) out.push(id)
+    }
+    return out
+  }
+  expect(await lit()).toEqual([])
+  // Unlit, a row is the engine's drawing alone.
+  expect(await rows.u1.drawn()).toMatchObject({ type: 'engine' })
+  await light('u3')
+  expect(await lit()).toEqual(['u3'])
+  // No background: the mark alone tells the row apart.
+  expect((await rows.u3.findAll({})).filter(el => el.props.backgroundColor !== undefined)).toEqual([])
+  // The mark drops past the blank row the engine draws above the prompt, onto its first line of text.
+  const markBox = (await rows.u3.findAll({ type: 'Box' })).find(el => el.props.marginTop !== undefined)
+  expect(markBox?.props.marginTop).toBe(1)
+  const mark = await rows.u3.find({ type: 'Text', text: '▌' })
+  expect(mark?.props.color).toBe('claude')
+  expect(await rows.u1.find({ type: 'Text', text: '▌' })).toBeUndefined()
+  expect(await rows.u3.find({ type: 'engine' } as never)).toBeDefined()
+  await light('u1')
+  expect(await lit()).toEqual(['u1'])
+  // A move whose scroll is refused (the kit's always is) leaves the light where it was.
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'next' })
+  await band.press({ key: 'latest' })
+  expect(await lit()).toEqual(['u1'])
+  // Saying something new puts the person at the end: no row is lit.
+  await say($, 'u4', 'four')
+  await clock.settle()
+  expect(await lit()).toEqual([])
+  await band.unmount()
+  for (const row of Object.values(rows)) await row.unmount()
+})
+
+test('a row that is not the person\'s prompt is never lit', async ($, on) => {
+  const { clock } = engine(on)
+  versionedStore(on, { highlightId: 'n1' })
+  on('ui.render', { component: 'UserMessage' }, () => ({ type: 'engine', ref: 0 }) as never)
+  await start($)
+  await clock.settle()
+  const row = await $.ui.mount({
+    plugin: 'session-compass',
+    surface: 'terminal',
+    component: 'UserMessage',
+    requestId: 'n1',
+    props: { text: 'task done', origin: { kind: 'task-notification' }, isExpanded: false },
+  })
+  expect(await row.drawn()).toMatchObject({ type: 'engine' })
+  await row.unmount()
 })
