@@ -767,9 +767,13 @@ export const BUTTON_CELLS = 6
 export const BUTTON_GAP = 1
 /** Cells between the summary and the buttons (the row's `marginLeft`). */
 export const BUTTONS_MARGIN = 1
+/** The band's fold-all toggle, left of the navigation buttons: an open book while blocks open by default, a closed one while they fold. */
+export const FOLD_ALL_ICONS = { open: '📖', folded: '📕' } as const
+/** Buttons on the band besides 🔁: the fold-all toggle and the four moves. */
+const BAND_BUTTON_COUNT = BAND_BUTTONS.length + 1
 /** Cells the whole button row takes, the margin before it included. */
 export const BUTTONS_WIDTH =
-  BAND_BUTTONS.length * BUTTON_CELLS + (BAND_BUTTONS.length - 1) * BUTTON_GAP + BUTTONS_MARGIN
+  BAND_BUTTON_COUNT * BUTTON_CELLS + (BAND_BUTTON_COUNT - 1) * BUTTON_GAP + BUTTONS_MARGIN
 
 /** Cells the engine keeps at the right of a site (its `[-]` mark): `bodyColumns` is the columns less these. */
 export const ENGINE_MARK_CELLS = 5
@@ -945,16 +949,39 @@ export function foldedText(text: string, columns: number): string {
   return escapeMarkdown(shown)
 }
 
-/** The folded blocks kept at most, the oldest dropped first. */
+/**
+ * How the output blocks are folded: every block follows `allFolded` (what
+ * the band's fold-all toggle sets) except the ones in `flipped`, which a
+ * block's own marker turned the other way.
+ */
+export type FoldState = { allFolded: boolean; flipped: string[] }
+
+/** Every block open, none turned: where a session starts. */
+export const EMPTY_FOLD: FoldState = { allFolded: false, flipped: [] }
+
+/** The blocks turned against the fold-all setting kept at most, the oldest dropped first. */
 export const FOLDED_KEPT = 200
 
-/** The folded ids with `id` folded or unfolded; null when that changes nothing. */
-export function withFold(folded: readonly string[], id: string, isFolded: boolean): string[] | null {
-  const has = folded.includes(id)
-  if (has === isFolded) return null
-  if (!isFolded) return folded.filter(f => f !== id)
-  const all = [...folded, id]
-  return all.length <= FOLDED_KEPT ? all : all.slice(all.length - FOLDED_KEPT)
+/** Whether the block `id` is drawn folded. */
+export function isFoldedIn(fold: FoldState, id: string): boolean {
+  return fold.allFolded !== fold.flipped.includes(id)
+}
+
+/** The fold state with the block `id` folded or unfolded; null when that changes nothing. */
+export function withFold(fold: FoldState, id: string, isFolded: boolean): FoldState | null {
+  if (isFoldedIn(fold, id) === isFolded) return null
+  if (fold.flipped.includes(id)) return { ...fold, flipped: fold.flipped.filter(f => f !== id) }
+  const all = [...fold.flipped, id]
+  return { ...fold, flipped: all.length <= FOLDED_KEPT ? all : all.slice(all.length - FOLDED_KEPT) }
+}
+
+/**
+ * The fold state with every block folded or opened, the ones a marker
+ * turned included (new blocks follow too); null when that changes nothing.
+ */
+export function withAllFolded(fold: FoldState, allFolded: boolean): FoldState | null {
+  if (fold.allFolded === allFolded && fold.flipped.length === 0) return null
+  return { allFolded, flipped: [] }
 }
 
 /**

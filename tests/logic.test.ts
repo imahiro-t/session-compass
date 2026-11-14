@@ -49,6 +49,9 @@ import {
   highlightAfterMove,
   outputRowCount,
   withFold,
+  withAllFolded,
+  isFoldedIn,
+  EMPTY_FOLD,
 } from '../hooks/logic'
 import type { Seen } from '../hooks/logic'
 
@@ -560,12 +563,12 @@ describe('the transcript file', () => {
 })
 
 describe('bandRoom', () => {
-  test('the body less the four buttons, and 🔁 in manual mode', () => {
-    // [ ⏫ ] x4 with three gaps and the margin: 6*4 + 3 + 1.
+  test('the body less the fold-all toggle and the four buttons, and 🔁 in manual mode', () => {
+    // [ 📖 ] and [ ⏫ ] x4 with four gaps and the margin: 6*5 + 4 + 1.
     expect(BAND_BUTTONS.map(b => b.kind)).toEqual(['first', 'prev', 'next', 'latest'])
-    expect(BUTTONS_WIDTH).toBe(28)
-    expect(bandRoom(80, false)).toBe(52)
-    expect(bandRoom(80, true)).toBe(45)
+    expect(BUTTONS_WIDTH).toBe(35)
+    expect(bandRoom(80, false)).toBe(45)
+    expect(bandRoom(80, true)).toBe(38)
     expect(bandRoom(20, false)).toBe(8)
   })
   test('a site with no bodyColumns reckons it from the viewport, 80 columns when unmeasured', () => {
@@ -706,18 +709,40 @@ describe('foldedText', () => {
 })
 
 describe('withFold', () => {
+  const open = (...flipped: string[]) => ({ allFolded: false, flipped })
+  const shut = (...flipped: string[]) => ({ allFolded: true, flipped })
   test('folds, unfolds, and says when nothing changes', () => {
-    expect(withFold([], 'a', true)).toEqual(['a'])
-    expect(withFold(['a', 'b'], 'a', false)).toEqual(['b'])
-    expect(withFold(['a'], 'a', true)).toBeNull()
-    expect(withFold([], 'a', false)).toBeNull()
+    expect(withFold(open(), 'a', true)).toEqual(open('a'))
+    expect(withFold(open('a', 'b'), 'a', false)).toEqual(open('b'))
+    expect(withFold(open('a'), 'a', true)).toBeNull()
+    expect(withFold(open(), 'a', false)).toBeNull()
+  })
+  test('with every block folded, a marker turns its own block open and back', () => {
+    expect(isFoldedIn(shut(), 'a')).toBe(true)
+    expect(withFold(shut(), 'a', false)).toEqual(shut('a'))
+    expect(isFoldedIn(shut('a'), 'a')).toBe(false)
+    expect(withFold(shut('a'), 'a', true)).toEqual(shut())
+    expect(withFold(shut(), 'a', true)).toBeNull()
   })
   test('keeps the newest FOLDED_KEPT, the oldest dropped first', () => {
     const many = Array.from({ length: FOLDED_KEPT }, (_, i) => `r${i}`)
-    const out = withFold(many, 'new', true)!
+    const out = withFold(open(...many), 'new', true)!.flipped
     expect(out.length).toBe(FOLDED_KEPT)
     expect(out[0]).toBe('r1')
     expect(out[out.length - 1]).toBe('new')
+  })
+})
+
+describe('withAllFolded', () => {
+  test('folds or opens every block, the turned ones included', () => {
+    expect(withAllFolded({ allFolded: false, flipped: ['a'] }, true)).toEqual({ allFolded: true, flipped: [] })
+    expect(withAllFolded({ allFolded: true, flipped: ['a'] }, false)).toEqual(EMPTY_FOLD)
+    // Setting it again clears the turned blocks: they follow the setting once more.
+    expect(withAllFolded({ allFolded: true, flipped: ['a'] }, true)).toEqual({ allFolded: true, flipped: [] })
+  })
+  test('says when nothing changes', () => {
+    expect(withAllFolded(EMPTY_FOLD, false)).toBeNull()
+    expect(withAllFolded({ allFolded: true, flipped: [] }, true)).toBeNull()
   })
 })
 

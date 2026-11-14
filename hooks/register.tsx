@@ -40,22 +40,26 @@ import {
   foldColumns,
   foldedText,
   highlightAfterMove,
+  isFoldedIn,
   outputRowCount,
+  withAllFolded,
   withFold,
+  EMPTY_FOLD,
+  FOLD_ALL_ICONS,
 } from './logic'
-import type { NavKind, Viewport } from './logic'
+import type { FoldState, NavKind, Viewport } from './logic'
 
 const FIRST_PROMPT = { plugin: 'session-compass', key: 'firstPrompt' } as const
 const SUMMARY = { plugin: 'session-compass', key: 'summary' } as const
 const NAV = { plugin: 'session-compass', key: 'nav' } as const
 const PROMPTS = { plugin: 'session-compass', key: 'prompts' } as const
-const FOLDED = { plugin: 'session-compass', key: 'folded' } as const
+const FOLD = { plugin: 'session-compass', key: 'fold' } as const
 const HIGHLIGHT = { plugin: 'session-compass', key: 'highlightId' } as const
 
 const firstPromptAtom = atom(FIRST_PROMPT, null)
 const summaryAtom = atom(SUMMARY, { status: 'idle' })
 const navAtom = atom(NAV, EMPTY_NAV)
-const foldedAtom = atom(FOLDED, [] as string[])
+const foldAtom = atom(FOLD, EMPTY_FOLD as FoldState)
 const highlightAtom = atom(HIGHLIGHT, null as string | null)
 
 const SUMMARY_SYSTEM =
@@ -577,16 +581,26 @@ async function setHighlight($: Dollar, id: string | null): Promise<void> {
   debug($, 'gave up writing the highlight: three writes lost the race')
 }
 
-/** Folds or unfolds one output block, by its id, with one compare-and-set tried three times. */
-async function setFold($: Dollar, id: string, isFolded: boolean): Promise<void> {
+/** Changes the fold state by `change` (null: nothing to change), with one compare-and-set tried three times. */
+async function changeFold($: Dollar, change: (fold: FoldState) => FoldState | null, what: string): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const held = await $.state.get(FOLDED)
-    const next = withFold(held.value ?? [], id, isFolded)
+    const held = await $.state.get(FOLD)
+    const next = change(held.value ?? EMPTY_FOLD)
     if (next === null) return
-    const written = await $.state.set(FOLDED, next, { ifVersion: held.version })
+    const written = await $.state.set(FOLD, next, { ifVersion: held.version })
     if (written.isSet) return
   }
-  debug($, `gave up ${isFolded ? 'folding' : 'unfolding'} ${id}: three writes lost the race`)
+  debug($, `gave up ${what}: three writes lost the race`)
+}
+
+/** Folds or unfolds one output block, by its id. */
+function setFold($: Dollar, id: string, isFolded: boolean): Promise<void> {
+  return changeFold($, fold => withFold(fold, id, isFolded), `${isFolded ? 'folding' : 'unfolding'} ${id}`)
+}
+
+/** Folds or opens every output block, the band's fold-all toggle. */
+function setAllFolded($: Dollar, allFolded: boolean): Promise<void> {
+  return changeFold($, fold => withAllFolded(fold, allFolded), allFolded ? 'folding all' : 'opening all')
 }
 
 /** Scrolls a row into view; the reason when it did not move. */
@@ -755,7 +769,7 @@ export const register: Register = (on, options) => {
     // line; a one-row block is drawn as it is, and reads no state.
     const columns = foldColumns(e.viewport?.columns)
     if (!isStopId(e.requestId) || outputRowCount(e.props.text, columns) < 2) return next(e)
-    const isFolded = (await read($, foldedAtom)).includes(e.requestId)
+    const isFolded = isFoldedIn(await read($, foldAtom), e.requestId)
     // The engine draws the body either way, in its own colors: folded, from
     // a rewritten text (`isSummary` and `onScreen` carried on untouched).
     const body = await next(isFolded ? { ...e, props: { ...e.props, text: foldedText(e.props.text, columns) } } : e)
@@ -831,6 +845,7 @@ export const register: Register = (on, options) => {
     const firstPrompt = await read($, firstPromptAtom)
     const summary = await read($, summaryAtom)
     const nav = await read($, navAtom)
+    const { allFolded } = await read($, foldAtom)
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const canRefresh = summaryMode === 'manual'
@@ -864,6 +879,11 @@ export const register: Register = (on, options) => {
               onPress={() => startSummary($, 'asked').catch(error => debug($, `refresh failed: ${String(error)}`))}
             />
           ) : null}
+          <Button
+            key="foldAll"
+            label={allFolded ? FOLD_ALL_ICONS.folded : FOLD_ALL_ICONS.open}
+            onPress={() => setAllFolded($, !allFolded).catch(error => debug($, `fold all failed: ${String(error)}`))}
+          />
           {BAND_BUTTONS.map(b => (
             <Button
               key={b.kind}

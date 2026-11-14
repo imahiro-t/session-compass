@@ -29,6 +29,7 @@ The question dialog takes the prompt's place, and the band with it. The summary 
 
 - Each block of Claude's output that takes more than one row (wrapping counted: one long paragraph counts too) gets a marker at its left: `▼` while it is open, `▶` while it is folded. A block of one row gets none (blank lines before or after its text are not counted).
 - Every block starts open. Click the marker to fold the block, and again to open it. The marker is drawn bold in the theme's `claude` colour, and is named by what a press does ("Fold output" / "Expand output") where the surface reads controls aloud; the output itself keeps Claude Code's own colours and drawing.
+- 📖 on the band folds every block at once and turns into 📕; 📕 opens them all and turns back into 📖. While everything is folded, blocks that come later are drawn folded too. Each block's marker still folds or opens that block alone afterwards; the next press of the book sets every block alike again, those included.
 - A folded block shows one row: its first line of text, without markdown decoration, cut to the window's width, with `…` when the block has more text than that line. A block that starts with a code fence or a table shows its first line of prose (a table, its header cells), not the code or the table rules; a block that is only code shows the code's first line.
 - Only the text blocks of Claude's replies fold. Tool calls and their results are not touched (Claude Code folds those itself with ctrl+o).
 

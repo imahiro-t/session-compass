@@ -96,14 +96,14 @@ async function say(
   })
 }
 
-test('with no prompt yet the band draws a placeholder and four buttons', async ($, on) => {
+test('with no prompt yet the band draws a placeholder, the fold-all toggle and four buttons', async ($, on) => {
   const { clock } = engine(on)
   await start($)
   await clock.settle()
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
     expect((await ui.find({ type: 'Text', text: /まだプロンプトがありません/ }))).toBeDefined()
-    for (const key of ['first', 'prev', 'next', 'latest']) {
+    for (const key of ['foldAll', 'first', 'prev', 'next', 'latest']) {
       expect(await ui.find({ key })).toBeDefined()
     }
     // Pressing any button with nothing to go to throws nothing and scrolls nothing.
@@ -690,8 +690,8 @@ test('the summary above the question dialog is cut to the band\'s own width, on 
     const line = await ui.find({ type: 'Text', text: /^ログイン画面のエラー/ })
     expect(line?.text).toBe(oneLine(LONG_SUMMARY, bandRoom(columns - 5, false)))
     expect(line?.text).toBe(bandLine)
-    // Not the 39 cells the dialog used to be given.
-    expect(textWidth(line!.text)).toBeGreaterThan(39)
+    // Not the 39 cells the dialog used to be given (at 80 columns the band's own room is about that now).
+    if (columns === 120) expect(textWidth(line!.text)).toBeGreaterThan(39)
     expect(line?.props.wrap).toBe('truncate-end')
     expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
@@ -908,6 +908,40 @@ test('the folded state is kept per block: another block stays open', async ($, o
   expect((await other.find({ key: 'fold' }))?.text).toBe('▼')
   await one.unmount()
   await other.unmount()
+})
+
+test('the band\'s book folds every block and opens them again, a marker still turning its own', async ($, on) => {
+  engine(on)
+  replyEngine(on)
+  await start($)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const one = await drawReply($, 'a1', 'one\ntwo', 80)
+  const other = await drawReply($, 'a2', 'three\nfour', 80)
+  await one.press({ key: 'fold' })
+  expect((await band.find({ key: 'foldAll' }))?.props.label).toBe('📖')
+
+  await band.press({ key: 'foldAll' })
+  expect((await band.find({ key: 'foldAll' }))?.props.label).toBe('📕')
+  await one.redraw()
+  await other.redraw()
+  expect((await one.find({ key: 'fold' }))?.text).toBe('▶')
+  expect((await other.find({ key: 'fold' }))?.text).toBe('▶')
+  // A block drawn after it folds too.
+  const later = await drawReply($, 'a3', 'five\nsix', 80)
+  expect((await later.find({ key: 'fold' }))?.text).toBe('▶')
+  // A marker opens its own block alone.
+  await other.press({ key: 'fold' })
+  expect((await other.find({ key: 'fold' }))?.text).toBe('▼')
+  await one.redraw()
+  expect((await one.find({ key: 'fold' }))?.text).toBe('▶')
+
+  await band.press({ key: 'foldAll' })
+  expect((await band.find({ key: 'foldAll' }))?.props.label).toBe('📖')
+  for (const ui of [one, other, later]) {
+    await ui.redraw()
+    expect((await ui.find({ key: 'fold' }))?.text).toBe('▼')
+  }
+  for (const ui of [band, one, other, later]) await ui.unmount()
 })
 
 /** A prompt row drawn over the engine's own node, mounted until the test lets it go. */
