@@ -27,7 +27,7 @@ The question dialog takes the prompt's place, and the band with it. The summary 
 
 ### Folding Claude's output
 
-- Each block of Claude's output that takes more than one row (wrapping counted: one long paragraph counts too) gets a marker at its left: `▼` while it is open, `▶` while it is folded. A block of one row gets none (blank lines before or after its text are not counted).
+- Each block of Claude's output gets a marker at its left, however many rows it takes: `▼` while it is open, `▶` while it is folded. Folding a block of one row simply shows that same row.
 - Every block starts open. Click the marker to fold the block, and again to open it. The marker is drawn bold in the theme's `claude` colour, and is named by what a press does ("Fold output" / "Expand output") where the surface reads controls aloud; the output itself keeps Claude Code's own colours and drawing.
 - 📖 on the band folds every block at once and turns into 📕; 📕 opens them all and turns back into 📖. While everything is folded, blocks that come later are drawn folded too. Each block's marker still folds or opens that block alone afterwards; the next press of the book sets every block alike again, those included.
 - A folded block shows one row: its first line of text, without markdown decoration, cut to the window's width, with `…` when the block has more text than that line. A block that starts with a code fence or a table shows its first line of prose (a table, its header cells), not the code or the table rules; a block that is only code shows the code's first line.
@@ -80,7 +80,6 @@ Change it in `/config`, or in your settings:
 
 - Folding and the highlight work in fullscreen mode (and on remote surfaces that redraw transcript rows). In the main, non-fullscreen screen, rows already written to the terminal's scrollback are never drawn again, so a fold or a highlight does not show there; the buttons' moves need fullscreen anyway.
 - The fold marker is pressed with a click (the mouse) only: buttons inside the transcript cannot take the keyboard focus, so there is no key for it.
-- Whether a block takes more than one row is reckoned from its plain text width, so where markdown changes the drawn width (a heading's marks, a link's URL) a block right at one row may get a marker; folding it then simply shows the same single row.
 - The fold state is kept by each block's message id. A block drawn under a temporary id while it streams may open again once it has its own.
 - Claude Code's own header at the top of the transcript, which names the prompt you are reading while you scroll, can name the prompt before the one 🔽 moved to. The header is Claude Code's, not this plugin's, and the plugin leaves it alone.
 

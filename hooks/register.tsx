@@ -41,7 +41,6 @@ import {
   foldedText,
   highlightAfterMove,
   isFoldedIn,
-  outputRowCount,
   withAllFolded,
   withFold,
   EMPTY_FOLD,
@@ -773,10 +772,10 @@ export const register: Register = (on, options) => {
     if ('onScreen' in e.props && e.props.onScreen !== undefined) {
       noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, false, Date.now())
     }
-    // A block of more than one row gets a marker that folds it to its first
-    // line; a one-row block is drawn as it is, and reads no state.
+    // Every block gets a marker that folds it to its first line, however
+    // many rows it takes.
     const columns = foldColumns(e.viewport?.columns)
-    if (!isStopId(e.requestId) || outputRowCount(e.props.text, columns) < 2) return next(e)
+    if (!isStopId(e.requestId)) return next(e)
     const isFolded = isFoldedIn(await read($, foldAtom), e.requestId)
     // The engine draws the body either way, in its own colors: folded, from
     // a rewritten text (`isSummary` and `onScreen` carried on untouched).
