@@ -865,6 +865,9 @@ test('a block of several lines opens unfolded under ▼, and the marker folds an
   // The marker is drawn in the accent color; the body is the engine's, its colors untouched.
   const marker = await ui.find({ type: 'Text', text: '▼' })
   expect(marker?.props.color).toBe('claude')
+  // On the terminal the marker drops past the blank row above the block, onto its first line.
+  const markerBox = (await ui.findAll({ type: 'Box' })).find(el => el.props.marginTop !== undefined)
+  expect(markerBox?.props.marginTop).toBe(1)
   // The control is named by what a press does, the state it is in told by that name.
   expect((await ui.find({ key: 'fold' }))?.props.label).toBe('Fold output')
   expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
@@ -955,8 +958,8 @@ async function mountRow($: Engine, requestId: string, text: string) {
   })
 }
 
-async function isLit(row: { find: (q: { type?: string }) => Promise<{ props: Record<string, unknown> } | undefined> }) {
-  return (await row.find({ type: 'Box' }))?.props.backgroundColor !== undefined
+async function isLit(row: { find: (q: { type?: string; text?: string }) => Promise<unknown> }) {
+  return (await row.find({ type: 'Text', text: '▌' })) !== undefined
 }
 
 /** A versioned store under `state.get` / `state.set`, as the engine keeps the plugin's state. */
@@ -977,7 +980,7 @@ function versionedStore(on: On, initial: Record<string, unknown> = {}) {
   return store
 }
 
-test('the lit prompt row has a background, and the light follows to the next prompt lit', async ($, on) => {
+test('the lit prompt row has a ▌ mark on its first line, and the light follows to the next prompt lit', async ($, on) => {
   const { clock } = engine(on)
   const store = versionedStore(on)
   // What a move that landed writes (the kit's transcript never lands a scroll).
@@ -1006,9 +1009,11 @@ test('the lit prompt row has a background, and the light follows to the next pro
   expect(await rows.u1.drawn()).toMatchObject({ type: 'engine' })
   await light('u3')
   expect(await lit()).toEqual(['u3'])
-  const box = await rows.u3.find({ type: 'Box' })
-  expect(box?.props.backgroundColor).toBe('diffAddedDimmed')
-  // A mark with a shape at its left tells the row apart without color too.
+  // No background: the mark alone tells the row apart.
+  expect((await rows.u3.findAll({})).filter(el => el.props.backgroundColor !== undefined)).toEqual([])
+  // The mark drops past the blank row the engine draws above the prompt, onto its first line of text.
+  const markBox = (await rows.u3.findAll({ type: 'Box' })).find(el => el.props.marginTop !== undefined)
+  expect(markBox?.props.marginTop).toBe(1)
   const mark = await rows.u3.find({ type: 'Text', text: '▌' })
   expect(mark?.props.color).toBe('claude')
   expect(await rows.u1.find({ type: 'Text', text: '▌' })).toBeUndefined()

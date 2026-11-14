@@ -19,7 +19,7 @@ A Claude Code plugin that adds a band above the prompt. Its left side tells you 
 - 🔼 and 🔽 go one prompt back and forward. Only your own prompts are stops, slash commands included: notifications, messages from other agents and the like are not. A move puts the prompt's row at the top of the transcript.
 - ⏫ goes to the very first prompt of the session, and ⏬ to the very end of the transcript (the line that closes the last turn, or the newest row). Both read the session's transcript file for it, so they reach rows far off screen that the band has never seen drawn, in a long or resumed session too.
 - If you scroll the transcript yourself, the buttons count from what you are reading: 🔼 goes back to the start of the prompt whose reply is on screen, 🔽 on to the next one. Until you scroll, they count from where the last button left you.
-- The prompt row a button lands on gets a background colour (the theme's `diffAddedDimmed`, with a `▌` mark in the `claude` colour at its left, so the row stands out without colour too), so you can see where you went. Moving to another prompt moves the colour with you, and sending a new prompt clears it. When ⏬ lands at the very end of the transcript, the newest prompt's row is the one coloured; it is not necessarily on screen then (a long latest reply pushes it above the window).
+- The prompt row a button lands on gets a `▌` mark in the `claude` colour at its left, so you can see where you went. Moving to another prompt moves the mark with you, and sending a new prompt clears it. When ⏬ lands at the very end of the transcript, the newest prompt's row is the one marked; it is not necessarily on screen then (a long latest reply pushes it above the window).
 
 ### While Claude asks you a question (AskUserQuestion)
 

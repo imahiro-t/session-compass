@@ -66,15 +66,21 @@ const SUMMARY_SYSTEM =
   'あなたはセッションの要約を書く。番号順に並んだユーザーの依頼（1 番がセッション最初の依頼、以降は新しいもの）から、このセッションで今取り組んでいることを 1 行（全角 40 字程度）で要約する。話題が移っていれば新しい話題を中心に、全体の流れが分かるように書く。「これまでの要約」が添えられていれば、番号の飛んだ間の依頼も含めた流れの手がかりにするが、新しい依頼で話題が変わっていればそれに引きずられず書き直す。前置き・引用符・句点以外の記号は不要で、要約だけを出力する。'
 
 /**
- * The background of the prompt row the last button move landed on: a theme
- * key, so it follows the light and dark themes and the row's text stays
- * readable on it.
+ * The rows the engine leaves blank above a transcript row inside the row
+ * itself, on the terminal: a mark drawn beside the row drops by as many to
+ * sit on the row's first line of text, not on the blank one.
  */
-const HIGHLIGHT_BG = 'diffAddedDimmed'
+const ROW_TOP_ROWS = 1
+
+/** The row's top gap a mark beside it skips, by the surface that draws it. */
+function rowTop(surface: string): number {
+  return surface === 'terminal' ? ROW_TOP_ROWS : 0
+}
+
 /**
- * The mark drawn at the left of that row, in the accent color: a shape, so
- * the row is told apart without color too (a monochrome terminal, NO_COLOR),
- * and seen even where the engine paints the row's own background over the Box's.
+ * The mark drawn at the left of the prompt row the last button move landed
+ * on, in the accent color: a shape, so it shows on a monochrome terminal
+ * (NO_COLOR) too.
  */
 const HIGHLIGHT_MARK = '▌'
 const HIGHLIGHT_MARK_COLOR = 'claude'
@@ -750,8 +756,10 @@ export const register: Register = (on, options) => {
     if (highlightId !== e.requestId) return row
     const { Box, Text } = $.ui.resolve(e)
     return (
-      <Box key="highlight" flexDirection="row" backgroundColor={HIGHLIGHT_BG}>
-        <Text color={HIGHLIGHT_MARK_COLOR}>{HIGHLIGHT_MARK}</Text>
+      <Box key="highlight" flexDirection="row">
+        <Box flexShrink={0} marginTop={rowTop(e.surface)}>
+          <Text color={HIGHLIGHT_MARK_COLOR}>{HIGHLIGHT_MARK}</Text>
+        </Box>
         <Box flexGrow={1} flexShrink={1}>
           {row}
         </Box>
@@ -777,7 +785,7 @@ export const register: Register = (on, options) => {
     const id = e.requestId
     return (
       <Box flexDirection="row">
-        <Box flexShrink={0} marginRight={1}>
+        <Box flexShrink={0} marginRight={1} marginTop={rowTop(e.surface)}>
           <Button
             key="fold"
             plain
