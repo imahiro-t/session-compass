@@ -845,6 +845,17 @@ test('a one-row output block has no fold marker and is the engine\'s alone', asy
   await ui.unmount()
 })
 
+test('a one-row block after blank lines gets no marker either', async ($, on) => {
+  engine(on)
+  replyEngine(on)
+  for (const [id, text] of [['a1', '\n\nDone.'], ['a2', '  \nDone.']] as const) {
+    const ui = await drawReply($, id, text, 80)
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    expect(await ui.drawn()).toMatchObject({ type: 'engine' })
+    await ui.unmount()
+  }
+})
+
 test('a block of several lines opens unfolded under ▼, and the marker folds and unfolds it', async ($, on) => {
   engine(on)
   const texts = replyEngine(on)
@@ -854,10 +865,13 @@ test('a block of several lines opens unfolded under ▼, and the marker folds an
   // The marker is drawn in the accent color; the body is the engine's, its colors untouched.
   const marker = await ui.find({ type: 'Text', text: '▼' })
   expect(marker?.props.color).toBe('claude')
+  // The control is named by what a press does, the state it is in told by that name.
+  expect((await ui.find({ key: 'fold' }))?.props.label).toBe('Fold output')
   expect(await ui.find({ type: 'engine' } as never)).toBeDefined()
   expect(texts[texts.length - 1]).toBe(text)
   await ui.press({ key: 'fold' })
   expect((await ui.find({ key: 'fold' }))?.text).toBe('▶')
+  expect((await ui.find({ key: 'fold' }))?.props.label).toBe('Expand output')
   expect(texts[texts.length - 1]).toBe(foldedText(text, foldColumns(100)))
   expect(texts[texts.length - 1]).toBe('Plan …')
   await ui.press({ key: 'fold' })
@@ -960,6 +974,10 @@ test('the lit prompt row has a background, and the light follows to the next pro
   expect(await lit()).toEqual(['u3'])
   const box = await rows.u3.find({ type: 'Box' })
   expect(box?.props.backgroundColor).toBe('diffAddedDimmed')
+  // A mark with a shape at its left tells the row apart without color too.
+  const mark = await rows.u3.find({ type: 'Text', text: '▌' })
+  expect(mark?.props.color).toBe('claude')
+  expect(await rows.u1.find({ type: 'Text', text: '▌' })).toBeUndefined()
   expect(await rows.u3.find({ type: 'engine' } as never)).toBeDefined()
   await light('u1')
   expect(await lit()).toEqual(['u1'])

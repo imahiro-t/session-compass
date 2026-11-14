@@ -37,6 +37,7 @@ import {
   withPastPrompts,
   withPrompt,
   withoutBadStops,
+  BAND_BUTTONS,
   BUTTONS_WIDTH,
   FOLDED_KEPT,
   bandRoom,
@@ -561,6 +562,7 @@ describe('the transcript file', () => {
 describe('bandRoom', () => {
   test('the body less the four buttons, and 🔁 in manual mode', () => {
     // [ ⏫ ] x4 with three gaps and the margin: 6*4 + 3 + 1.
+    expect(BAND_BUTTONS.map(b => b.kind)).toEqual(['first', 'prev', 'next', 'latest'])
     expect(BUTTONS_WIDTH).toBe(28)
     expect(bandRoom(80, false)).toBe(52)
     expect(bandRoom(80, true)).toBe(45)
@@ -586,6 +588,10 @@ describe('outputRowCount', () => {
     expect(outputRowCount('one\ntwo', 40)).toBe(2)
     expect(outputRowCount('one\n\nthree', 40)).toBe(3)
     expect(outputRowCount('trailing newline\n\n', 40)).toBe(1)
+    // Blank lines before the text are not drawn either.
+    expect(outputRowCount('\n\nDone.', 40)).toBe(1)
+    expect(outputRowCount('  \nDone.', 40)).toBe(1)
+    expect(outputRowCount('\n\none\ntwo', 40)).toBe(2)
     expect(outputRowCount('x'.repeat(40), 40)).toBe(1)
     expect(outputRowCount('x'.repeat(41), 40)).toBe(2)
     expect(outputRowCount('x'.repeat(130), 40)).toBe(4)
@@ -667,6 +673,16 @@ describe('foldedText', () => {
     const tight = unescape(foldedText(`${'y'.repeat(40)}\nmore`, 40))
     expect(tight.endsWith('…')).toBe(true)
     expect(textWidth(tight)).toBeLessThanOrEqual(40)
+  })
+  test('no … where nothing is hidden: marks alone are not more text', () => {
+    expect(foldedText('A **bold** word and [a link](https://example.com/a/very/long/path/that/wraps/the/row).', 80)).toBe(
+      'A bold word and a link.',
+    )
+    expect(foldedText('\n\n## Only a heading\n\n---\n', 80)).toBe('Only a heading')
+    expect(foldedText('```\nonly = 1\n```', 80)).toBe('only = 1')
+    // Text in a fence is more text, before the line shown or after it.
+    expect(foldedText('```\na = 1\n```\nThen.', 80)).toBe('Then. …')
+    expect(foldedText('```\na = 1\nb = 2\n```', 80)).toBe('a = 1 …')
   })
   test('every markdown mark left is escaped', () => {
     const out = foldedText('# Head\n\nthe *a* [b] <c> # d | e ~ f & g _h_ \\ i `j`', 80)

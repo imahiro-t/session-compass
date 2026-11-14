@@ -32,6 +32,7 @@ import {
   firstPromptRow,
   drawnRowIds,
   parseRows,
+  BAND_BUTTONS,
   BUTTON_GAP,
   BUTTONS_MARGIN,
   bandRoom,
@@ -60,14 +61,6 @@ const highlightAtom = atom(HIGHLIGHT, null as string | null)
 const SUMMARY_SYSTEM =
   'あなたはセッションの要約を書く。番号順に並んだユーザーの依頼（1 番がセッション最初の依頼、以降は新しいもの）から、このセッションで今取り組んでいることを 1 行（全角 40 字程度）で要約する。話題が移っていれば新しい話題を中心に、全体の流れが分かるように書く。「これまでの要約」が添えられていれば、番号の飛んだ間の依頼も含めた流れの手がかりにするが、新しい依頼で話題が変わっていればそれに引きずられず書き直す。前置き・引用符・句点以外の記号は不要で、要約だけを出力する。'
 
-/** The buttons, left to right. */
-const BUTTONS: readonly { kind: NavKind; label: string }[] = [
-  { kind: 'first', label: '⏫' },
-  { kind: 'prev', label: '🔼' },
-  { kind: 'next', label: '🔽' },
-  { kind: 'latest', label: '⏬' },
-]
-
 /**
  * The background of the prompt row the last button move landed on: a theme
  * key, so it follows the light and dark themes and the row's text stays
@@ -75,10 +68,12 @@ const BUTTONS: readonly { kind: NavKind; label: string }[] = [
  */
 const HIGHLIGHT_BG = 'diffAddedDimmed'
 /**
- * The one-cell strip drawn at the left of that row in the accent color: seen
- * even where the engine paints the row's own background over the Box's.
+ * The mark drawn at the left of that row, in the accent color: a shape, so
+ * the row is told apart without color too (a monochrome terminal, NO_COLOR),
+ * and seen even where the engine paints the row's own background over the Box's.
  */
-const HIGHLIGHT_STRIP = 'claude'
+const HIGHLIGHT_MARK = '▌'
+const HIGHLIGHT_MARK_COLOR = 'claude'
 
 /** Bytes of the transcript file's head ⏫ reads for the first prompt. */
 const HEAD_BYTES = 2_000_000
@@ -742,7 +737,7 @@ export const register: Register = (on, options) => {
     const { Box, Text } = $.ui.resolve(e)
     return (
       <Box key="highlight" flexDirection="row" backgroundColor={HIGHLIGHT_BG}>
-        <Text backgroundColor={HIGHLIGHT_STRIP}> </Text>
+        <Text color={HIGHLIGHT_MARK_COLOR}>{HIGHLIGHT_MARK}</Text>
         <Box flexGrow={1} flexShrink={1}>
           {row}
         </Box>
@@ -769,7 +764,11 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="row">
         <Box flexShrink={0} marginRight={1}>
-          <Button key="fold" plain onPress={() => setFold($, id, !isFolded).catch(error => debug($, `fold failed: ${String(error)}`))}>
+          <Button
+            key="fold"
+            plain
+            label={isFolded ? 'Expand output' : 'Fold output'}
+            onPress={() => setFold($, id, !isFolded).catch(error => debug($, `fold failed: ${String(error)}`))}>
             <Text color="claude" weight="bold">
               {isFolded ? '▶' : '▼'}
             </Text>
@@ -865,7 +864,7 @@ export const register: Register = (on, options) => {
               onPress={() => startSummary($, 'asked').catch(error => debug($, `refresh failed: ${String(error)}`))}
             />
           ) : null}
-          {BUTTONS.map(b => (
+          {BAND_BUTTONS.map(b => (
             <Button
               key={b.kind}
               label={b.label}

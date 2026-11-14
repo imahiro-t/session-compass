@@ -19,7 +19,7 @@ A Claude Code plugin that adds a band above the prompt. Its left side tells you 
 - 🔼 and 🔽 go one prompt back and forward. Only your own prompts are stops, slash commands included: notifications, messages from other agents and the like are not. A move puts the prompt's row at the top of the transcript.
 - ⏫ goes to the very first prompt of the session, and ⏬ to the very end of the transcript (the line that closes the last turn, or the newest row). Both read the session's transcript file for it, so they reach rows far off screen that the band has never seen drawn, in a long or resumed session too.
 - If you scroll the transcript yourself, the buttons count from what you are reading: 🔼 goes back to the start of the prompt whose reply is on screen, 🔽 on to the next one. Until you scroll, they count from where the last button left you.
-- The prompt row a button lands on gets a background colour (the theme's `diffAddedDimmed`, with a one-cell strip in the `claude` colour at its left), so you can see where you went. Moving to another prompt moves the colour with you, and sending a new prompt clears it. When ⏬ lands at the very end of the transcript, the newest prompt's row is the one coloured; it is not necessarily on screen then (a long latest reply pushes it above the window).
+- The prompt row a button lands on gets a background colour (the theme's `diffAddedDimmed`, with a `▌` mark in the `claude` colour at its left, so the row stands out without colour too), so you can see where you went. Moving to another prompt moves the colour with you, and sending a new prompt clears it. When ⏬ lands at the very end of the transcript, the newest prompt's row is the one coloured; it is not necessarily on screen then (a long latest reply pushes it above the window).
 
 ### While Claude asks you a question (AskUserQuestion)
 
@@ -27,9 +27,9 @@ The question dialog takes the prompt's place, and the band with it. The summary 
 
 ### Folding Claude's output
 
-- Each block of Claude's output that takes more than one row (wrapping counted: one long paragraph counts too) gets a marker at its left: `▼` while it is open, `▶` while it is folded. A block of one row gets none.
-- Every block starts open. Click the marker to fold the block, and again to open it. The marker is drawn bold in the theme's `claude` colour; the output itself keeps Claude Code's own colours and drawing.
-- A folded block shows one row: its first line of text, without markdown decoration, cut to the window's width, with `…` when there is more. A block that starts with a code fence or a table shows its first line of prose (a table, its header cells), not the code or the table rules; a block that is only code shows the code's first line.
+- Each block of Claude's output that takes more than one row (wrapping counted: one long paragraph counts too) gets a marker at its left: `▼` while it is open, `▶` while it is folded. A block of one row gets none (blank lines before or after its text are not counted).
+- Every block starts open. Click the marker to fold the block, and again to open it. The marker is drawn bold in the theme's `claude` colour, and is named by what a press does ("Fold output" / "Expand output") where the surface reads controls aloud; the output itself keeps Claude Code's own colours and drawing.
+- A folded block shows one row: its first line of text, without markdown decoration, cut to the window's width, with `…` when the block has more text than that line. A block that starts with a code fence or a table shows its first line of prose (a table, its header cells), not the code or the table rules; a block that is only code shows the code's first line.
 - Only the text blocks of Claude's replies fold. Tool calls and their results are not touched (Claude Code folds those itself with ctrl+o).
 
 ### What is sent, and when

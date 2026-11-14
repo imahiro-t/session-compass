@@ -754,8 +754,13 @@ function numberedPrompts(prompts: readonly string[]): string {
 // ---------------------------------------------------------------------------
 // The band's width, shared with the summary above the question dialog.
 
-/** The band's navigation buttons. */
-export const BAND_BUTTONS = 4
+/** The band's navigation buttons, left to right: what it draws and what its width is reckoned from. */
+export const BAND_BUTTONS: readonly { kind: NavKind; label: string }[] = [
+  { kind: 'first', label: '⏫' },
+  { kind: 'prev', label: '🔼' },
+  { kind: 'next', label: '🔽' },
+  { kind: 'latest', label: '⏬' },
+]
 /** Cells one button takes on the terminal: `[ ⏫ ]`. */
 export const BUTTON_CELLS = 6
 /** Cells between two buttons (the row's `gap`). */
@@ -763,7 +768,8 @@ export const BUTTON_GAP = 1
 /** Cells between the summary and the buttons (the row's `marginLeft`). */
 export const BUTTONS_MARGIN = 1
 /** Cells the whole button row takes, the margin before it included. */
-export const BUTTONS_WIDTH = BAND_BUTTONS * BUTTON_CELLS + (BAND_BUTTONS - 1) * BUTTON_GAP + BUTTONS_MARGIN
+export const BUTTONS_WIDTH =
+  BAND_BUTTONS.length * BUTTON_CELLS + (BAND_BUTTONS.length - 1) * BUTTON_GAP + BUTTONS_MARGIN
 
 /** Cells the engine keeps at the right of a site (its `[-]` mark): `bodyColumns` is the columns less these. */
 export const ENGINE_MARK_CELLS = 5
@@ -807,14 +813,15 @@ export function foldColumns(viewportColumns: number | undefined): number {
 
 /**
  * How many rows an output block takes at `columns` cells, wrapping counted:
- * each line (trailing blank lines left out) its width over the columns,
+ * each line (blank lines before and after left out, as the engine draws
+ * none) its width over the columns,
  * rounded up, an empty one a row. An approximation: the engine's markdown
  * drawing (a heading's marks, a link's URL) changes the widths a little.
  */
 export function outputRowCount(text: string, columns: number): number {
   const width = Math.max(1, columns)
   let rows = 0
-  for (const line of text.trimEnd().split('\n')) {
+  for (const line of text.trim().split('\n')) {
     rows += Math.max(1, Math.ceil(textWidth(line) / width))
   }
   return rows
@@ -880,16 +887,25 @@ function withoutBlockMarks(line: string): string {
  * the fence's first line with text. Empty when there is none.
  */
 export function foldLine(text: string): string {
+  return foldParts(text).line
+}
+
+/**
+ * `foldLine`'s line, and whether the block holds text besides it: another
+ * line with text, in a fence or out of one. Marks alone are not more text.
+ */
+function foldParts(text: string): { line: string; hasMore: boolean } {
   let fence: string | null = null
-  let firstInFence: string | null = null
+  const inFence: string[] = []
+  const outside: string[] = []
   for (const raw of text.split('\n')) {
     const line = raw.trim()
     const mark = fenceMark(line)
     if (fence !== null) {
       if (mark !== null && mark[0] === fence[0] && mark.length >= fence.length && line.slice(mark.length).trim() === '') {
         fence = null
-      } else if (firstInFence === null && line !== '') {
-        firstInFence = line
+      } else if (line !== '') {
+        inFence.push(line.replace(/\s+/g, ' '))
       }
       continue
     }
@@ -899,9 +915,10 @@ export function foldLine(text: string): string {
     }
     if (isRuleLine(line)) continue
     const plain = line.startsWith('|') ? tableRowText(line) : withoutInlineMarks(withoutBlockMarks(line))
-    if (plain !== '') return plain
+    if (plain !== '') outside.push(plain)
   }
-  return firstInFence === null ? '' : firstInFence.replace(/\s+/g, ' ')
+  const all = outside.length > 0 ? [...outside, ...inFence] : inFence
+  return { line: all[0] ?? '', hasMore: all.length > 1 }
 }
 
 /** Every mark markdown reads, escaped, `\` first so none is escaped twice. */
@@ -920,12 +937,11 @@ export function escapeMarkdown(text: string): string {
  * plain line's: an escape draws nothing. `…` alone where no line has text.
  */
 export function foldedText(text: string, columns: number): string {
-  const line = foldLine(text)
+  const { line, hasMore } = foldParts(text)
   if (line === '') return '…'
   let shown = oneLine(line, columns)
-  const flat = line.replace(/\s+/g, ' ').trim()
-  const isCut = shown !== flat
-  if (!isCut && flat !== text.replace(/\s+/g, ' ').trim()) shown = oneLine(`${shown} …`, columns)
+  const isCut = shown !== line.replace(/\s+/g, ' ').trim()
+  if (!isCut && hasMore) shown = oneLine(`${shown} …`, columns)
   return escapeMarkdown(shown)
 }
 
