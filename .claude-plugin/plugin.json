@@ -1,7 +1,7 @@
 {
   "name": "session-compass",
   "version": "0.4.0",
-  "description": "Session Compass: a band above the Claude Code prompt that tells what the session is about (a one-line summary of your prompts so far, made again after each prompt or on 🔁) and has buttons to step back and forth through your prompts; the summary shows above Claude's question dialog too, at the band's width; output blocks fold with a ▼/▶ marker or all at once with 📖/📕 on the band, and the prompt a button lands on is marked with ▌",
+  "description": "Session Compass: a band above the Claude Code prompt that tells what the session is about (a one-line summary of your prompts so far, made again after each prompt or on 🔁) and has buttons to step back and forth through your prompts and Claude's replies to them (or your prompts alone); the summary shows above Claude's question dialog too, at the band's width; output blocks fold with a ▼/▶ marker or all at once with 📖/📕 on the band, and the prompt or reply a button lands on is marked with ▌",
   "author": {
     "name": "Takashi Imahiro"
   },
@@ -17,6 +17,16 @@
         "manual"
       ],
       "default": "auto"
+    },
+    "navTarget": {
+      "type": "string",
+      "title": "Navigation target",
+      "description": "all: the band's 🔼/🔽 stop at your prompts and at Claude's replies after each (its text blocks). prompts: they stop at your prompts only.",
+      "options": [
+        "all",
+        "prompts"
+      ],
+      "default": "all"
     }
   }
 }

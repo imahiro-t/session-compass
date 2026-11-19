@@ -776,7 +776,7 @@ test('a slash command the person typed is a stop, in its place in the transcript
   await ui.unmount()
 })
 
-test('⏬ goes to the end of the newest row, its last tool call\'s for a reply, newest first', async ($, on) => {
+test('⏬ goes to the end of the newest row, its last tool call\'s for a reply, newest first', { options: { navTarget: 'prompts' } }, async ($, on) => {
   const { clock, calls } = engine(on)
   await start($)
   await say($, 'u1', 'one')
@@ -1049,4 +1049,278 @@ test('a row that is not the person\'s prompt is never lit', async ($, on) => {
   })
   expect(await row.drawn()).toMatchObject({ type: 'engine' })
   await row.unmount()
+})
+
+// ---------------------------------------------------------------------------
+// Replies as stops (userConfig `navTarget`).
+
+/** Appends one of Claude's replies to the main conversation (or a subagent's, with `agentId`). */
+async function reply($: Engine, uuid: string, text: string, extra: { agentId?: string } = {}) {
+  await $.session.append({
+    door: 'response',
+    origin: { kind: 'model' } as never,
+    uuid,
+    ...extra,
+    message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text }] } as never,
+  })
+}
+
+/** Draws one of Claude's output blocks, as the transcript would. */
+async function drawReplyRow(
+  $: Engine,
+  requestId: string,
+  text: string,
+  onScreen?: { first: number; last: number; of: number } | null,
+) {
+  const row = await $.ui.mount({
+    plugin: 'session-compass',
+    surface: 'terminal',
+    component: 'AssistantMessage',
+    requestId,
+    props: { text, isFirstOfReply: true, ...(onScreen === undefined ? {} : { onScreen }) },
+  })
+  await row.unmount()
+}
+
+/** The engine's own drawing of prompt and reply rows, beneath the plugin. */
+function rowEngines(on: On) {
+  on('ui.render', { component: 'UserMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+  on('ui.render', { component: 'AssistantMessage' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{e.props.text}</Text>
+  })
+}
+
+/**
+ * Presses a band button and, where it asked for a stop, writes what `move()`
+ * writes once its scroll landed (the kit's never does): the cursor on it.
+ */
+function lander(store: Map<string, { value: unknown; version: number }>, calls: { scroll: string[] }) {
+  return async (ui: { press: (q: { key: string }) => Promise<unknown> }, key: 'first' | 'prev' | 'next' | 'latest') => {
+    const asked = calls.scroll.length
+    await ui.press({ key })
+    const target = calls.scroll[asked]
+    if (target === undefined) return
+    const held = store.get('nav')!
+    store.set('nav', { value: { ...(held.value as Nav), cursorId: target }, version: held.version + 1 })
+  }
+}
+
+/** Prompt A, replies 1 and 2, prompt B, replies 3 and 4, appended live. */
+async function sayAndReply($: Engine) {
+  await say($, 'A', 'prompt A')
+  await reply($, 'r1', 'reply 1')
+  await reply($, 'r2', 'reply 2')
+  await say($, 'B', 'prompt B')
+  await reply($, 'r3', 'reply 3')
+  await reply($, 'r4', 'reply 4')
+}
+
+test('by default 🔼 and 🔽 stop at each prompt and each reply after it', async ($, on) => {
+  const { clock, calls } = engine(on)
+  const store = versionedStore(on)
+  const press = lander(store, calls)
+  await start($)
+  await sayAndReply($)
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  for (let i = 0; i < 7; i++) await press(ui, 'prev')
+  expect(calls.scroll).toEqual(['r4', 'r3', 'B', 'r2', 'r1', 'A', 'A'])
+  calls.scroll.length = 0
+  for (let i = 0; i < 6; i++) await press(ui, 'next')
+  expect(calls.scroll).toEqual(['r1', 'r2', 'B', 'r3', 'r4', 'r4'])
+  // A subagent's reply and a reply with no text are no stops.
+  await reply($, 'sub', 'from a subagent', { agentId: 'agent-1' })
+  await reply($, 'blank', '  ')
+  await clock.settle()
+  expect((store.get('nav')!.value as Nav).promptIds).toEqual(['A', 'r1', 'r2', 'B', 'r3', 'r4'])
+  await ui.unmount()
+})
+
+test('with navTarget prompts the buttons stop at the prompts alone, as before', { options: { navTarget: 'prompts' } }, async ($, on) => {
+  const { clock, calls } = engine(on)
+  const store = versionedStore(on)
+  const press = lander(store, calls)
+  rowEngines(on)
+  await start($)
+  await sayAndReply($)
+  await clock.settle()
+  // Drawn replies are not looked up either.
+  const read = calls.messages
+  await drawReplyRow($, 'old', 'an old reply')
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  for (let i = 0; i < 3; i++) await press(ui, 'prev')
+  expect(calls.scroll).toEqual(['B', 'A', 'A'])
+  expect(calls.messages).toBe(read)
+  expect((store.get('nav')!.value as Nav).promptIds).toEqual(['A', 'B'])
+  await ui.unmount()
+})
+
+test('with navTarget prompts, replies an earlier all stored are passed over, a new prompt sent or not', { options: { navTarget: 'prompts' } }, async ($, on) => {
+  const { clock, calls } = engine(on)
+  const nav: Nav = {
+    liveIds: ['A', 'r1', 'B', 'r2'],
+    pastPrompts: [],
+    promptIds: ['A', 'r1', 'B', 'r2'],
+    cursorId: null,
+    replyIds: ['r1', 'r2'],
+  }
+  const store = versionedStore(on, { nav })
+  const press = lander(store, calls)
+  await start($)
+  await say($, 'C', 'prompt C')
+  await clock.settle()
+  expect((store.get('nav')!.value as Nav).replyIds).toEqual(['r1', 'r2'])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  for (let i = 0; i < 3; i++) await press(ui, 'prev')
+  expect(calls.scroll).toEqual(['C', 'B', 'A'])
+  await ui.unmount()
+})
+
+test('scrolled by hand into a reply, 🔼 goes to its top and 🔽 to the next stop', async ($, on) => {
+  const { clock, calls } = engine(on)
+  rowEngines(on)
+  await start($)
+  await say($, 'A', 'prompt A')
+  await reply($, 'a1', 'a long reply')
+  await reply($, 'a2', 'another reply')
+  await say($, 'B', 'prompt B')
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // a1's top went up past the viewport, a2 is still below it.
+  await drawReplyRow($, 'a1', 'a long reply', { first: 6, last: 15, of: 40 })
+  await drawReplyRow($, 'a2', 'another reply', null)
+  await ui.press({ key: 'prev' })
+  await ui.press({ key: 'next' })
+  expect(calls.scroll).toEqual(['a1', 'a2'])
+  await ui.unmount()
+})
+
+test('the reply a button lands on gets the ▌ mark; ⏫ goes to the first prompt and ⏬ to the newest reply', async ($, on) => {
+  const { clock, calls } = engine(on)
+  const store = versionedStore(on)
+  const texts = replyEngine(on)
+  const long = 'This reply is one long paragraph with no newline in it at all, '.repeat(3).trim()
+  await start($)
+  await say($, 'A', 'prompt A')
+  await reply($, 'a1', long)
+  await reply($, 'a2', 'three')
+  await clock.settle()
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'first' })
+  await band.press({ key: 'latest' })
+  expect(calls.scroll).toEqual(['A', 'a2'])
+  await band.unmount()
+
+  // What a move that landed on a1 writes.
+  store.set('highlightId', { value: 'a1', version: 1 })
+  const lit = await drawReply($, 'a1', long, 80)
+  const other = await drawReply($, 'a2', 'three', 80)
+  expect(await isLit(lit as never)).toBe(true)
+  expect(await isLit(other as never)).toBe(false)
+  const mark = await lit.find({ type: 'Text', text: '▌' })
+  expect(mark?.props.color).toBe('claude')
+  // The mark sits left of the fold marker, both on the block's first line.
+  const tops = (await lit.findAll({ type: 'Box' })).filter(el => el.props.marginTop !== undefined)
+  expect(tops.map(el => el.props.marginTop)).toEqual([1, 1])
+  // Folded, the lit block's line is a cell shorter, for the mark.
+  await lit.press({ key: 'fold' })
+  await lit.redraw()
+  expect(texts).toContain(foldedText(long, foldColumns(80) - 1))
+  expect(texts).not.toContain(foldedText(long, foldColumns(80)))
+  // Saying something new puts the light out.
+  await say($, 'B', 'prompt B')
+  await clock.settle()
+  await lit.redraw()
+  expect(await isLit(lit as never)).toBe(false)
+  await lit.unmount()
+  await other.unmount()
+})
+
+test('replies known only from drawn rows join the stops in transcript order', async ($, on) => {
+  const { clock, calls, transcript } = engine(on)
+  const store = versionedStore(on)
+  const press = lander(store, calls)
+  rowEngines(on)
+  transcript.push(
+    { role: 'user', text: 'old one', toolUses: [] },
+    { role: 'assistant', text: 'old reply', toolUses: [] },
+    { role: 'user', text: 'old two', toolUses: [] },
+  )
+  await start($)
+  await clock.settle()
+  // Drawn newest first, as a resumed transcript scrolled back up would be; a
+  // blank block is no stop.
+  await drawRow($, 'p2', 'old two')
+  await drawReplyRow($, 'ra', 'old reply')
+  await drawReplyRow($, 'rb', '   ')
+  await drawRow($, 'p1', 'old one')
+  await say($, 'u3', 'new one')
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  for (let i = 0; i < 4; i++) await press(ui, 'prev')
+  expect(calls.scroll).toEqual(['u3', 'p2', 'ra', 'p1'])
+  expect((store.get('nav')!.value as Nav).replyIds).toEqual(['ra'])
+  await ui.unmount()
+})
+
+test('a reply drawn and merged before its append is still one stop', async ($, on) => {
+  const { clock, calls, transcript } = engine(on)
+  const store = versionedStore(on)
+  const press = lander(store, calls)
+  rowEngines(on)
+  await start($)
+  await say($, 'u1', 'one')
+  await clock.settle()
+  transcript.push({ role: 'user', text: 'one', toolUses: [] }, { role: 'assistant', text: 'answer', toolUses: [] })
+  // The append's own work waits on a timer; the row is drawn and a button
+  // pressed (which merges the drawn rows) before it runs.
+  await reply($, 'a1', 'answer')
+  await drawReplyRow($, 'a1', 'answer')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'next' })
+  expect((store.get('nav')!.value as Nav).pastPrompts.map(p => p.id)).toEqual(['a1'])
+  await clock.settle()
+  const nav = store.get('nav')!.value as Nav
+  expect(nav.promptIds).toEqual(['u1', 'a1'])
+  expect(nav.pastPrompts).toEqual([])
+  for (let i = 0; i < 3; i++) await press(band, 'prev')
+  expect(calls.scroll).toEqual(['a1', 'u1', 'u1'])
+  await band.unmount()
+})
+
+test('a drawn reply the transcript does not name is no stop, and is not looked up again until its text changes', async ($, on) => {
+  const { clock, calls, transcript } = engine(on)
+  rowEngines(on)
+  transcript.push({ role: 'user', text: 'one', toolUses: [] })
+  await start($)
+  await say($, 'u1', 'one')
+  await clock.settle()
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await drawReplyRow($, 'ax', 'drawn unlike the transcript')
+  let read = calls.messages
+  await band.press({ key: 'prev' })
+  expect(calls.messages).toBe(read + 1)
+  expect(calls.logs).toContainEqual('session-compass: the reply ax matches none in the transcript: no stop')
+  read = calls.messages
+  for (let i = 0; i < 3; i++) {
+    await drawReplyRow($, 'ax', 'drawn unlike the transcript')
+    await band.press({ key: 'prev' })
+  }
+  expect(calls.messages).toBe(read)
+  // Drawn with another text (a reply that grew), it is looked up afresh, and found.
+  transcript.push({ role: 'assistant', text: 'now it matches', toolUses: [] })
+  await drawReplyRow($, 'ax', 'now it matches')
+  await band.press({ key: 'next' })
+  expect(calls.messages).toBe(read + 1)
+  expect(calls.scroll.every(id => id === 'u1')).toBe(true)
+  await band.unmount()
 })

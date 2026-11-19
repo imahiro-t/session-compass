@@ -289,17 +289,62 @@ export function rowIdOf(uuid: string, content: unknown): string {
   return uuid
 }
 
+/** One entry of `$.session.messages()`, as far as the band reads it. */
+export type MessageEntry = { role: string; text: string; toolResults?: readonly unknown[] }
+
+/** A user entry's text as the person typed it; null when it is no prompt of theirs. */
+function promptTextOf(m: MessageEntry): string | null {
+  if (m.role !== 'user' || (m.toolResults?.length ?? 0) > 0) return null
+  const text = m.text.trim()
+  const typed = commandLine(text) ?? (MACHINE_ROW.test(text) ? '' : text)
+  return typed === '' ? null : typed
+}
+
 /** The person's prompt rows of `$.session.messages()`, oldest first, slash commands included. */
-export function userPromptTexts(
-  messages: readonly { role: string; text: string; toolResults?: readonly unknown[] }[],
-): string[] {
-  return messages
-    .filter(m => m.role === 'user' && (m.toolResults?.length ?? 0) === 0)
-    .map(m => {
-      const text = m.text.trim()
-      return commandLine(text) ?? (MACHINE_ROW.test(text) ? '' : text)
-    })
-    .filter(text => text !== '')
+export function userPromptTexts(messages: readonly MessageEntry[]): string[] {
+  const out: string[] = []
+  for (const m of messages) {
+    const text = promptTextOf(m)
+    if (text !== null) out.push(text)
+  }
+  return out
+}
+
+/**
+ * A reply's text as its row draws it: the `<context>` blocks the terminal
+ * hides are taken out.
+ */
+function drawnReplyText(text: string): string {
+  return text.replace(/<context>[\s\S]*?<\/context>/g, '')
+}
+
+/** The fingerprint of a reply's text, told apart from a prompt's by `r:` before it. */
+export function replyKey(text: string): string {
+  return `r:${promptKey(drawnReplyText(text))}`
+}
+
+/** Whether a stop's key is a reply's (`replyKey`), not a prompt's. */
+export function isReplyKey(key: string): boolean {
+  return key.startsWith('r:')
+}
+
+/**
+ * The fingerprints of every stop in `$.session.messages()`, oldest first: the
+ * person's prompts (`promptKey`, as `userPromptTexts` reads them) and the
+ * replies with text (`replyKey`). What drawn stops are ordered by; the prompts
+ * among them keep the order they have among the prompts alone.
+ */
+export function stopKeys(messages: readonly MessageEntry[]): string[] {
+  const out: string[] = []
+  for (const m of messages) {
+    if (m.role === 'assistant') {
+      if (drawnReplyText(m.text).trim() !== '') out.push(replyKey(m.text))
+      continue
+    }
+    const text = promptTextOf(m)
+    if (text !== null) out.push(promptKey(text))
+  }
+  return out
 }
 
 /**
@@ -361,16 +406,96 @@ export function promptIdsOf(pastPrompts: readonly PastPrompt[], liveIds: readonl
   return [...pastPrompts.map(p => p.id), ...liveIds]
 }
 
+/** `replyIds` as a nav field: left out where it is absent (a nav stored before replies were stops). */
+function repliesField(replyIds: readonly string[] | undefined): { replyIds?: string[] } {
+  return replyIds === undefined ? {} : { replyIds: [...replyIds] }
+}
+
 /**
  * The nav with a newly appended prompt of the person's: added at the end of
  * `liveIds` once, taken out of `pastPrompts`, and the cursor back at the
- * latest. Null when it changes nothing.
+ * latest. The replies it knows stay replies. Null when it changes nothing.
  */
 export function withLivePrompt(nav: Nav, id: string): Nav | null {
   if (nav.liveIds.includes(id) && nav.cursorId === null) return null
   const liveIds = nav.liveIds.includes(id) ? nav.liveIds : [...nav.liveIds, id]
   const pastPrompts = nav.pastPrompts.filter(p => p.id !== id)
-  return { liveIds, pastPrompts, promptIds: promptIdsOf(pastPrompts, liveIds), cursorId: null }
+  const replyIds = nav.replyIds?.filter(r => r !== id)
+  return { liveIds, pastPrompts, promptIds: promptIdsOf(pastPrompts, liveIds), cursorId: null, ...repliesField(replyIds) }
+}
+
+/**
+ * The nav with a newly appended reply of Claude's: added at the end of
+ * `liveIds` once and to `replyIds`, taken out of `pastPrompts` (where a row
+ * drawn before the append may have put it), so it is one stop, not two. The
+ * cursor stays: the person may be reading back while Claude writes. Null when
+ * it changes nothing.
+ */
+export function withLiveReply(nav: Nav, id: string): Nav | null {
+  const isLive = nav.liveIds.includes(id)
+  const isPast = nav.pastPrompts.some(p => p.id === id)
+  const isReply = nav.replyIds?.includes(id) ?? false
+  if (isLive && !isPast && isReply) return null
+  const liveIds = isLive ? nav.liveIds : [...nav.liveIds, id]
+  const pastPrompts = isPast ? nav.pastPrompts.filter(p => p.id !== id) : nav.pastPrompts
+  const replyIds = isReply ? (nav.replyIds ?? []) : [...(nav.replyIds ?? []), id]
+  return { liveIds, pastPrompts, promptIds: promptIdsOf(pastPrompts, liveIds), cursorId: nav.cursorId, replyIds: [...replyIds] }
+}
+
+/** What the buttons stop at: `all`, the prompts and the replies; `prompts`, the prompts alone. */
+export type NavMode = 'all' | 'prompts'
+
+/**
+ * The stops the buttons step through in `mode`, oldest first. In `prompts`
+ * the replies are left out, those an earlier `all` stored included, so the
+ * buttons go as they did before replies were stops.
+ */
+export function stopIdsFor(nav: Nav, mode: NavMode): string[] {
+  if (mode === 'all' || nav.replyIds === undefined || nav.replyIds.length === 0) return nav.promptIds
+  const replies = new Set(nav.replyIds)
+  return nav.promptIds.filter(id => !replies.has(id))
+}
+
+/** The person's prompts among the stops, oldest first: what counts the prompts (⏫'s climb). */
+export function promptOnlyIds(nav: Nav): string[] {
+  return stopIdsFor(nav, 'prompts')
+}
+
+/**
+ * Splits drawn stops new to the nav by whether they can be placed: every
+ * prompt can (one the transcript does not name goes first, as it always
+ * has); a reply only when the transcript names it, more times than the past
+ * replies held (`held`) of the same key already take. A reply placed first
+ * would be out of order for sure, so one that matches none is no stop.
+ */
+export function splitPastReplies(
+  drawn: readonly PastPrompt[],
+  transcriptKeys: readonly string[],
+  held: readonly PastPrompt[] = [],
+): { placed: PastPrompt[]; unmatched: PastPrompt[] } {
+  const left = new Map<string, number>()
+  for (const key of transcriptKeys) {
+    if (isReplyKey(key)) left.set(key, (left.get(key) ?? 0) + 1)
+  }
+  for (const p of held) {
+    if (left.has(p.key)) left.set(p.key, left.get(p.key)! - 1)
+  }
+  const placed: PastPrompt[] = []
+  const unmatched: PastPrompt[] = []
+  for (const p of drawn) {
+    if (!isReplyKey(p.key)) {
+      placed.push(p)
+      continue
+    }
+    const n = left.get(p.key) ?? 0
+    if (n > 0) {
+      left.set(p.key, n - 1)
+      placed.push(p)
+    } else {
+      unmatched.push(p)
+    }
+  }
+  return { placed, unmatched }
 }
 
 /** The drawn prompts the nav does not know yet. */
@@ -387,14 +512,17 @@ export function unknownPrompts(nav: Nav, drawn: readonly PastPrompt[]): PastProm
 }
 
 /**
- * The nav with drawn prompts it did not know merged into `pastPrompts`, in
- * the order `orderPast` gives them. Null when there are none to add.
+ * The nav with drawn stops it did not know merged into `pastPrompts`, in
+ * the order `orderPast` gives them; the replies among them (`replyKey`
+ * keys) are added to `replyIds` too. Null when there are none to add.
  */
 export function withPastPrompts(nav: Nav, drawn: readonly PastPrompt[], transcriptKeys: readonly string[]): Nav | null {
   const added = unknownPrompts(nav, drawn)
   if (added.length === 0) return null
   const pastPrompts = orderPast([...nav.pastPrompts, ...added], transcriptKeys)
-  return { ...nav, pastPrompts, promptIds: promptIdsOf(pastPrompts, nav.liveIds) }
+  const replies = added.filter(p => isReplyKey(p.key)).map(p => p.id)
+  const replyIds = replies.length === 0 ? nav.replyIds : [...(nav.replyIds ?? []).filter(r => !replies.includes(r)), ...replies]
+  return { ...nav, pastPrompts, promptIds: promptIdsOf(pastPrompts, nav.liveIds), ...repliesField(replyIds) }
 }
 
 export type NavKind = 'first' | 'prev' | 'next' | 'latest'
@@ -423,11 +551,12 @@ export function isStopId(id: string): boolean {
  * earlier version kept). The same nav object when there is none.
  */
 export function withoutBadStops(nav: Nav): Nav {
-  if (nav.promptIds.every(isStopId)) return nav
+  if (nav.promptIds.every(isStopId) && (nav.replyIds ?? []).every(isStopId)) return nav
   const liveIds = nav.liveIds.filter(isStopId)
   const pastPrompts = nav.pastPrompts.filter(p => isStopId(p.id))
   const cursorId = nav.cursorId !== null && isStopId(nav.cursorId) ? nav.cursorId : null
-  return { liveIds, pastPrompts, promptIds: promptIdsOf(pastPrompts, liveIds), cursorId }
+  const replyIds = nav.replyIds?.filter(isStopId)
+  return { liveIds, pastPrompts, promptIds: promptIdsOf(pastPrompts, liveIds), cursorId, ...repliesField(replyIds) }
 }
 
 /**
@@ -437,9 +566,10 @@ export function withoutBadStops(nav: Nav): Nav {
 export type Seen = { readonly first: number; readonly last: number; readonly of: number } | null
 
 /**
- * Where the viewport stands among the prompts, in half steps of the prompt
- * list: `k` is prompt k's own row at the top, `k + 0.5` somewhere in prompt
- * k's turn past its row, `-0.5` above the first prompt.
+ * Where the viewport stands among the stops (prompts, and replies where they
+ * are stops), in half steps of the stop list: `k` is stop k's own row at the
+ * top, `k + 0.5` somewhere past its row's top and above the next stop's row,
+ * `-0.5` above the first stop.
  *
  * `at` is the best guess, from the viewport's top as the terminal's own
  * header reads it; `lo`..`hi` is every position the viewport is consistent
@@ -969,8 +1099,9 @@ export function withAllFolded(fold: FoldState, allFolded: boolean): FoldState | 
 }
 
 /**
- * The prompt a move lights: the one it landed on; for ⏬ landed at the end of
- * the transcript (`landedId` null), the newest prompt; null where none is.
+ * The stop a move lights: the one it landed on; for ⏬ landed at the end of
+ * the transcript (`landedId` null), the newest stop (the newest prompt, or
+ * the newest reply where replies are stops); null where none is.
  */
 export function highlightAfterMove(kind: NavKind, promptIds: readonly string[], landedId: string | null): string | null {
   if (landedId !== null) return landedId
