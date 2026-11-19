@@ -2,7 +2,7 @@
 
 English | [日本語](README.ja.md)
 
-A Claude Code plugin that adds a band above the prompt. Its left side tells you what the session is about: a one-line summary of what you have asked so far. Its right side has buttons to step through your prompts in the conversation: ⏫ the first, 🔼 the previous, 🔽 the next, ⏬ the newest. The summary follows the session as it moves on (after each prompt, or only when you press 🔁, as you choose in settings), and it shows above Claude's question dialog too.
+A Claude Code plugin that adds a band above the prompt. Its left side tells you what the session is about: a one-line summary of what you have asked so far. Its right side has buttons to step through your prompts in the conversation, and through Claude's replies to them: ⏫ the first, 🔼 the previous, 🔽 the next, ⏬ the newest. The summary follows the session as it moves on (after each prompt, or only when you press 🔁, as you choose in settings), and it shows above Claude's question dialog too.
 
 ## How it works
 
@@ -16,10 +16,10 @@ A Claude Code plugin that adds a band above the prompt. Its left side tells you 
 
 ### The buttons
 
-- 🔼 and 🔽 go one prompt back and forward. Only your own prompts are stops, slash commands included: notifications, messages from other agents and the like are not. A move puts the prompt's row at the top of the transcript.
+- 🔼 and 🔽 go one stop back and forward. The stops are your own prompts, slash commands included, and (by default) each text block of Claude's replies after them: prompt A → reply 1 → reply 2 → prompt B → reply 3 → reply 4. With [`navTarget`](#navtarget) set to `prompts`, only your prompts are stops, as before. Notifications, messages from other agents, subagents' output, tool calls and their results are never stops. A move puts the stop's row at the top of the transcript.
 - ⏫ goes to the very first prompt of the session, and ⏬ to the very end of the transcript (the line that closes the last turn, or the newest row). Both read the session's transcript file for it, so they reach rows far off screen that the band has never seen drawn, in a long or resumed session too.
-- If you scroll the transcript yourself, the buttons count from what you are reading: 🔼 goes back to the start of the prompt whose reply is on screen, 🔽 on to the next one. Until you scroll, they count from where the last button left you.
-- The prompt row a button lands on gets a `▌` mark in the `claude` colour at its left, so you can see where you went. Moving to another prompt moves the mark with you, and sending a new prompt clears it. When ⏬ lands at the very end of the transcript, the newest prompt's row is the one marked; it is not necessarily on screen then (a long latest reply pushes it above the window).
+- If you scroll the transcript yourself, the buttons count from what you are reading: 🔼 goes back to the start of the stop you are reading, whether a reply or a prompt (with `prompts`, to the start of the prompt whose reply is on screen), and 🔽 goes on to the next stop. Until you scroll, they count from where the last button left you.
+- The prompt or reply row a button lands on gets a `▌` mark in the `claude` colour at its left (on a reply, left of its fold marker), so you can see where you went. Moving to another stop moves the mark with you, and sending a new prompt clears it. When ⏬ lands at the very end of the transcript, the newest stop's row is the one marked (the newest reply, or with `prompts` the newest prompt); it is not necessarily on screen then (a long block pushes its first row above the window).
 
 ### While Claude asks you a question (AskUserQuestion)
 
@@ -48,7 +48,7 @@ This repository is its own marketplace (`.claude-plugin/marketplace.json`, named
 ```
 
 1. When the plugin's details show, choose a scope (the user scope enables it in every later session)
-2. On the settings screen, set `summaryMode` (default `auto`)
+2. On the settings screen, set `summaryMode` (default `auto`) and `navTarget` (default `all`)
 3. Once `Installed session-compass. Plugin is now active.` shows, it works in that session right away
 
 Session Compass is also listed in the [erin-the-black-plugins](https://github.com/imahiro-t/claude-plugins) marketplace (installed from there, the settings key in the example below is `session-compass@erin-the-black-plugins` instead of `session-compass@session-compass`). Install it from one of the two marketplaces only: installed from both, its hooks are registered twice and the band is drawn by both. To switch from one to the other, uninstall the one you have first.
@@ -76,12 +76,35 @@ Change it in `/config`, or in your settings:
 }
 ```
 
+### `navTarget`
+
+Where the band's 🔼 and 🔽 stop: `all` (the default) or `prompts`.
+
+| Value | What happens |
+| --- | --- |
+| `all` | They stop at your prompts and at each text block of Claude's replies after them |
+| `prompts` | They stop at your prompts only |
+
+⏫ and ⏬ go to the first prompt and to the end of the transcript either way. Change it in `/config`, or in your settings:
+
+```json
+{
+  "pluginConfigs": {
+    "session-compass@session-compass": {
+      "options": { "navTarget": "prompts" }
+    }
+  }
+}
+```
+
 ## Known limitations
 
 - Folding and the highlight work in fullscreen mode (and on remote surfaces that redraw transcript rows). In the main, non-fullscreen screen, rows already written to the terminal's scrollback are never drawn again, so a fold or a highlight does not show there; the buttons' moves need fullscreen anyway.
 - The fold marker is pressed with a click (the mouse) only: buttons inside the transcript cannot take the keyboard focus, so there is no key for it.
 - The fold state is kept by each block's message id. A block drawn under a temporary id while it streams may open again once it has its own.
 - Claude Code's own header at the top of the transcript, which names the prompt you are reading while you scroll, can name the prompt before the one 🔽 moved to. The header is Claude Code's, not this plugin's, and the plugin leaves it alone.
+- In a resumed session, a reply from before the resume is a stop only once its row is drawn and its text matches the reply's text in the transcript file. A reply whose drawn text differs from the file's is not a stop.
+- In a resumed session, rows from before the resume that have the same text (two replies that both say "Done.", say, or two identical prompts) are told apart only by the order they are drawn in. Scrolling up so that the newer one is drawn first can swap their places in the order 🔼 and 🔽 follow. Replies and prompts that come in live are always in their right order.
 
 ## Development
 

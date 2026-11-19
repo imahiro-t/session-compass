@@ -12,6 +12,12 @@ import {
   navTarget,
   promptKey,
   promptLine,
+  promptOnlyIds,
+  climbNext,
+  replyKey,
+  splitPastReplies,
+  stopIdsFor,
+  stopKeys,
   summaryBasis,
   summaryInput,
   summaryLine,
@@ -25,6 +31,7 @@ import {
   noteReport,
   viewSpan,
   withLivePrompt,
+  withLiveReply,
   withPastPrompts,
   withPrompt,
   withoutBadStops,
@@ -46,7 +53,7 @@ import {
   EMPTY_FOLD,
   FOLD_ALL_ICONS,
 } from './logic'
-import type { FoldState, NavKind, Viewport } from './logic'
+import type { FoldState, NavKind, NavMode, Viewport } from './logic'
 
 const FIRST_PROMPT = { plugin: 'session-compass', key: 'firstPrompt' } as const
 const SUMMARY = { plugin: 'session-compass', key: 'summary' } as const
@@ -83,6 +90,17 @@ function rowTop(surface: string): number {
  */
 const HIGHLIGHT_MARK = '▌'
 const HIGHLIGHT_MARK_COLOR = 'claude'
+/** Cells the mark takes beside a row. */
+const HIGHLIGHT_MARK_CELLS = 1
+
+/** Whether a message's content holds text to read: a string, or a text block that is not blank. */
+function hasText(content: unknown): boolean {
+  if (typeof content === 'string') return content.trim() !== ''
+  if (!Array.isArray(content)) return false
+  return content.some(
+    (b: { type?: unknown; text?: unknown } | null) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim() !== '',
+  )
+}
 
 /** Bytes of the transcript file's head ⏫ reads for the first prompt. */
 const HEAD_BYTES = 2_000_000
@@ -114,11 +132,18 @@ type Dollar = EngineInterface
 // token was started by an environment that is gone (reload, respawn).
 const envToken = crypto.randomUUID()
 
-// Prompts seen by drawing their rows, id to fingerprint (`promptKey`). A
-// render hook may not write state, so they wait here until a hook outside
-// drawing merges them (mergeBuffer). A reload empties it; the rows fire
-// `UserMessage` again when redrawn.
+// Stops seen by drawing their rows, id to fingerprint (`promptKey` for a
+// prompt, `replyKey` for a reply). A render hook may not write state, so they
+// wait here until a hook outside drawing merges them (mergeBuffer). A reload
+// empties it; the rows fire `UserMessage` / `AssistantMessage` again when
+// redrawn.
 const renderBuffer = new Map<string, string>()
+
+// Drawn replies the transcript did not name when last looked (their drawn
+// text differs from the stored one, say), id to fingerprint: no stops, and
+// not looked up again until drawn with another text. Kept here, not in
+// state, so the transcript is read again once after a reload at most.
+const unmatchedReplies = new Map<string, string>()
 
 // What each drawn prompt row last said of the viewport (`onScreen`), per
 // surface: where the person has scrolled to, read when a button is pressed.
@@ -186,33 +211,56 @@ async function writeNav($: Dollar, what: string, change: (nav: Nav) => Nav | nul
 }
 
 /**
- * The person's prompts in the transcript, oldest first, and whether that is
- * the whole transcript. `$.session.messages()` holds the newest 4096 entries
+ * The person's prompts in the transcript, oldest first, the fingerprints of
+ * every stop in it (`stopKeys`: the prompts and the replies), and whether
+ * that is the whole transcript. `$.session.messages()` holds the newest 4096 entries
  * only, so an answer of exactly 4096 counts as not whole too: at the limit
  * there is no telling a lost head from a transcript that happens to be 4096
  * entries long. When the read is refused (`{ deny }`), `texts` is empty,
  * `isWhole` is false and `deny` gives the reason.
  */
-async function transcriptPrompts($: Dollar): Promise<{ texts: string[]; isWhole: boolean; deny?: string }> {
+async function transcriptPrompts(
+  $: Dollar,
+): Promise<{ texts: string[]; keys: string[]; isWhole: boolean; deny?: string }> {
   // Typed wide on purpose: the main conversation's read is never denied by
   // the type, yet a `session.messages` hook may still answer `{ deny }`.
   const messages = (await $.session.messages()) as SessionMessagesResult
-  if (!Array.isArray(messages)) return { texts: [], isWhole: false, deny: messages.deny }
-  return { texts: userPromptTexts(messages), isWhole: messages.length < MESSAGES_LIMIT }
+  if (!Array.isArray(messages)) return { texts: [], keys: [], isWhole: false, deny: messages.deny }
+  return { texts: userPromptTexts(messages), keys: stopKeys(messages), isWhole: messages.length < MESSAGES_LIMIT }
 }
 
 /**
- * Moves the prompts drawn rows showed into the nav. Reads the transcript
- * (to order them) only when one of them is new to the nav. A drawn prompt
- * leaves the buffer only once the nav holds it, so a failed write loses none.
+ * Moves the stops drawn rows showed into the nav. Reads the transcript (to
+ * order them) only when one of them is new to the nav and not a reply the
+ * transcript was already found not to name. A drawn stop leaves the buffer
+ * only once the nav holds it, so a failed write loses none; a reply the
+ * transcript does not name leaves it at once, no stop.
  */
 async function mergeBuffer($: Dollar): Promise<void> {
+  for (const [id, key] of renderBuffer) {
+    if (unmatchedReplies.get(id) === key) renderBuffer.delete(id)
+  }
   if (renderBuffer.size === 0) return
-  const drawn: PastPrompt[] = [...renderBuffer].map(([id, key]) => ({ id, key }))
-  const held = await $.state.get(NAV)
-  let isHeld = unknownPrompts(held.value ?? EMPTY_NAV, drawn).length === 0
+  let drawn: PastPrompt[] = [...renderBuffer].map(([id, key]) => ({ id, key }))
+  const held = (await $.state.get(NAV)).value ?? EMPTY_NAV
+  const unknown = unknownPrompts(held, drawn)
+  let isHeld = unknown.length === 0
   if (!isHeld) {
-    const keys = (await transcriptPrompts($)).texts.map(promptKey)
+    const { keys, deny } = await transcriptPrompts($)
+    const { unmatched } = splitPastReplies(unknown, keys, held.pastPrompts)
+    for (const p of unmatched) {
+      // A refused read names no reply: those stay in the buffer, looked up
+      // again at the next merge, not taken for replies the transcript lacks.
+      if (deny !== undefined) continue
+      unmatchedReplies.set(p.id, p.key)
+      if (renderBuffer.get(p.id) === p.key) renderBuffer.delete(p.id)
+      debug($, `the reply ${p.id} matches none in the transcript: no stop`)
+    }
+    if (deny !== undefined && unmatched.length > 0) {
+      debug($, `could not read the transcript to place ${unmatched.length} drawn replies: ${deny}`)
+    }
+    const skipped = new Set(unmatched.map(p => p.id))
+    drawn = drawn.filter(p => !skipped.has(p.id))
     isHeld = await writeNav($, 'drawn prompts', current => withPastPrompts(current, drawn, keys))
   }
   if (!isHeld) return
@@ -234,6 +282,9 @@ async function keepPrompt($: Dollar, line: string): Promise<string[] | null> {
   debug($, 'gave up keeping a prompt: three writes lost the race')
   return null
 }
+
+/** What the buttons stop at: prompts and replies, or prompts alone (userConfig `navTarget`). */
+let navMode: NavMode = 'all'
 
 /** How the summary is kept: `auto` after each prompt, `manual` on 🔁 (userConfig `summaryMode`). */
 type SummaryMode = 'auto' | 'manual'
@@ -372,14 +423,15 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     if (renderBuffer.size > 0) await mergeBuffer($)
     const held = await $.state.get(NAV)
     const nav = withoutBadStops(held.value ?? EMPTY_NAV)
+    const ids = stopIdsFor(nav, navMode)
     const viewport = viewOn(surface)
-    const view = viewSpan(nav.promptIds, viewport.seen, viewport.sides)
+    const view = viewSpan(ids, viewport.seen, viewport.sides)
     // Until the person scrolls, the last move is where they are; after, the viewport is.
     const isViewFirst = viewport.isHandScrolled
-    const target = navTarget(kind, nav.promptIds, nav.cursorId, view, isViewFirst)
+    const target = navTarget(kind, ids, nav.cursorId, view, isViewFirst)
     debug(
       $,
-      `${kind} counts from ${navPosition(nav.promptIds, nav.cursorId, view, isViewFirst)} ` +
+      `${kind} counts from ${navPosition(ids, nav.cursorId, view, isViewFirst)} ` +
         `(cursor ${nav.cursorId ?? 'end'}, view ${view === null ? 'none' : `${view.lo}..${view.hi} at ${view.at}`}` +
         `${isViewFirst ? ', scrolled by hand' : ''}, moving ${viewport.direction ?? 'unknown'})`,
     )
@@ -393,7 +445,7 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
     // the rows the scroll brings on screen report afresh. A scroll that does
     // not land leaves the viewport, and what is known of it, as it was.
     const before = copyViewport(viewport)
-    noteMove(viewport, nav.promptIds, target.index, Date.now())
+    noteMove(viewport, ids, target.index, Date.now())
     // ⏬ goes to the end of the transcript: the bottom of the newest row on
     // the viewport's bottom. Where none of the newest rows can be reached, it
     // goes to the newest prompt, as the other buttons go to theirs.
@@ -405,7 +457,7 @@ async function move($: Dollar, kind: NavKind, surface: string): Promise<void> {
       return
     }
     await setCursor($, target.id)
-    await setHighlight($, highlightAfterMove(kind, nav.promptIds, landed ? null : target.id))
+    await setHighlight($, highlightAfterMove(kind, ids, landed ? null : target.id))
     if (target.index === 0) await walkUp($, surface, target.id)
   } catch (error) {
     debug($, `navigation failed: ${String(error)}`)
@@ -478,8 +530,9 @@ async function toFirstOfFile($: Dollar, surface: string, nav: Nav): Promise<bool
   if (first === null) return false
   const viewport = viewOn(surface)
   const before = copyViewport(viewport)
-  const index = nav.promptIds.indexOf(first.id)
-  noteMove(viewport, nav.promptIds, Math.max(0, index), Date.now())
+  const ids = stopIdsFor(nav, navMode)
+  const index = ids.indexOf(first.id)
+  noteMove(viewport, ids, Math.max(0, index), Date.now())
   const denied = await scrollTo($, first.id, 'start')
   if (denied !== undefined) {
     viewBySurface.set(surface, before)
@@ -488,7 +541,7 @@ async function toFirstOfFile($: Dollar, surface: string, nav: Nav): Promise<bool
   }
   debug($, `first lands on ${first.id}, the transcript's first prompt`)
   if (index === -1) {
-    const keys = (await transcriptPrompts($)).texts.map(promptKey)
+    const { keys } = await transcriptPrompts($)
     await writeNav($, 'first prompt', current =>
       withPastPrompts(withoutBadStops(current), [{ id: first.id, key: promptKey(first.text) }], keys),
     )
@@ -524,7 +577,8 @@ async function toEndOfFile($: Dollar, surface: string, nav: Nav): Promise<boolea
   if (candidates.length === 0) return false
   const viewport = viewOn(surface)
   const before = copyViewport(viewport)
-  noteMove(viewport, nav.promptIds, nav.promptIds.length, Date.now())
+  const stops = stopIdsFor(nav, navMode)
+  noteMove(viewport, stops, stops.length, Date.now())
   let last: string | null = null
   let skipped = 0
   for (const id of candidates.slice(0, END_TRIES)) {
@@ -542,7 +596,7 @@ async function toEndOfFile($: Dollar, surface: string, nav: Nav): Promise<boolea
   }
   debug($, `latest lands on the end of ${last}, the transcript's last row${skipped > 0 ? ` drawn here (${skipped} newer not drawn)` : ''}`)
   await writeNav($, 'cursor', current => (current.cursorId === null ? null : { ...current, cursorId: null }))
-  const ids = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV).promptIds
+  const ids = stopIdsFor(withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV), navMode)
   await setHighlight($, highlightAfterMove('latest', ids, null))
   return true
 }
@@ -630,17 +684,20 @@ function sleep($: Dollar, ms: number): Promise<void> {
  * Only drawn rows tell their ids, and a long or resumed transcript draws
  * only the rows near the viewport, so the earliest prompt known may not be
  * the first. While the transcript holds more of the person's prompts than
- * the mod knows, it shows the screen above the known first prompt (that
- * prompt at the bottom), lets the rows there draw, and moves on to any
- * earlier prompt they show; at the last one found it puts that prompt on
- * top. It stops where the screen above shows no prompt (a reply longer than
- * the screen) or a scroll is refused.
+ * the mod knows, it shows the screen above the known first stop (that stop
+ * at the bottom), lets the rows there draw, and moves on to any earlier
+ * stop they show (a prompt, or in `all` a reply too); at the last one found
+ * it puts that stop on top. It stops where the screen above shows no
+ * earlier stop (a reply longer than the screen) or a scroll is refused, and
+ * never moves down (`climbNext`).
  */
 async function walkUp($: Dollar, surface: string, from: string): Promise<void> {
-  const nav = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV)
+  // Prompts are counted against prompts: the replies the band knows are no
+  // prompts of the transcript's.
+  const known = promptOnlyIds(withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV))
   const { texts } = await transcriptPrompts($)
-  if (texts.length <= nav.promptIds.length) return
-  debug($, `the transcript has ${texts.length} prompts, the band knows ${nav.promptIds.length}: looking above ${from}`)
+  if (texts.length <= known.length) return
+  debug($, `the transcript has ${texts.length} prompts, the band knows ${known.length}: looking above ${from}`)
   let current = from
   for (let step = 0; step < WALK_STEPS; step++) {
     const denied = await scrollTo($, current, 'end')
@@ -650,12 +707,16 @@ async function walkUp($: Dollar, surface: string, from: string): Promise<void> {
     }
     await sleep($, WALK_WAIT_MS)
     if (renderBuffer.size > 0) await mergeBuffer($)
-    const first = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV).promptIds[0]
-    if (first === undefined || first === current) break
-    debug($, `found ${first} above ${current}`)
-    current = first
+    // The climb goes by the stops, not the prompts alone: a reply drawn
+    // above is a step up too, and a prompt known only below `current` is
+    // never one.
+    const stops = stopIdsFor(withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV), navMode)
+    const above = climbNext(stops, current)
+    if (above === null) break
+    debug($, `found ${above} above ${current}`)
+    current = above
   }
-  const ids = withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV).promptIds
+  const ids = stopIdsFor(withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV), navMode)
   noteMove(viewOn(surface), ids, Math.max(0, ids.indexOf(current)), Date.now())
   const denied = await scrollTo($, current, 'start')
   if (denied !== undefined) {
@@ -670,6 +731,7 @@ async function walkUp($: Dollar, surface: string, from: string): Promise<void> {
 
 export const register: Register = (on, options) => {
   summaryMode = options.summaryMode === 'manual' ? 'manual' : 'auto'
+  navMode = options.navTarget === 'prompts' ? 'prompts' : 'all'
 
   on('session.start', ($, e, next) => {
     // The first `session.start` is awaited before the first prompt: nothing
@@ -726,6 +788,23 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && result.deny === undefined && NEWEST_DOORS.has(e.door)) {
       noteNewestRow(rowIdOf(e.uuid, (e.message as { content?: unknown }).content))
     }
+    // A reply of the main conversation with text (`response`, not a notice) is a stop (in `all`), by
+    // the id its text block is drawn under.
+    const { uuid } = e
+    if (
+      navMode === 'all' &&
+      e.agentId === undefined &&
+      result.deny === undefined &&
+      e.door === 'response' &&
+      e.message.type === 'assistant' &&
+      isStopId(uuid) &&
+      hasText((e.message as { content?: unknown }).content)
+    ) {
+      later($, 'new reply', async () => {
+        unmatchedReplies.delete(uuid)
+        await writeNav($, 'new reply', nav => withLiveReply(nav, uuid))
+      })
+    }
     return result
   }).catch(($, e, next) => next(e))
 
@@ -767,15 +846,21 @@ export const register: Register = (on, options) => {
   })
 
   // Reply rows tell which way the viewport moves, so a prompt row that jumps
-  // out of view whole is known to be above it or below it.
+  // out of view whole is known to be above it or below it. In `all` a reply
+  // with text is a stop of its own too: remembered like a drawn prompt, and
+  // its reports place the viewport among the stops.
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    const isStop = navMode === 'all' && isStopId(e.requestId) && e.props.text.trim() !== ''
+    if (isStop) renderBuffer.set(e.requestId, replyKey(e.props.text))
     if ('onScreen' in e.props && e.props.onScreen !== undefined) {
-      noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, false, Date.now())
+      noteReport(viewOn(e.surface), e.requestId, e.props.onScreen, isStop, Date.now())
     }
-    // Every block gets a marker that folds it to its first line, however
-    // many rows it takes.
-    const columns = foldColumns(e.viewport?.columns)
     if (!isStopId(e.requestId)) return next(e)
+    // The reply a button move landed on is lit, as a prompt row is.
+    const isLit = navMode === 'all' && (await read($, highlightAtom)) === e.requestId
+    // Every block gets a marker that folds it to its first line, however
+    // many rows it takes; a lit one's line is a cell shorter, for the mark.
+    const columns = Math.max(8, foldColumns(e.viewport?.columns) - (isLit ? HIGHLIGHT_MARK_CELLS : 0))
     const isFolded = isFoldedIn(await read($, foldAtom), e.requestId)
     // The engine draws the body either way, in its own colors: folded, from
     // a rewritten text (`isSummary` and `onScreen` carried on untouched).
@@ -784,6 +869,11 @@ export const register: Register = (on, options) => {
     const id = e.requestId
     return (
       <Box flexDirection="row">
+        {isLit ? (
+          <Box key="highlight" flexShrink={0} marginTop={rowTop(e.surface)}>
+            <Text color={HIGHLIGHT_MARK_COLOR}>{HIGHLIGHT_MARK}</Text>
+          </Box>
+        ) : null}
         <Box flexShrink={0} marginRight={1} marginTop={rowTop(e.surface)}>
           <Button
             key="fold"
@@ -857,7 +947,7 @@ export const register: Register = (on, options) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const canRefresh = summaryMode === 'manual'
     const room = bandRoom(e.props.bodyColumns, canRefresh)
-    const hasPrompts = nav.promptIds.length > 0
+    const hasPrompts = stopIdsFor(nav, navMode).length > 0
 
     const band = bandText(firstPrompt, summary, room)
     const left =

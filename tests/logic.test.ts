@@ -34,8 +34,16 @@ import {
   noteReport,
   viewSpan,
   withLivePrompt,
+  withLiveReply,
   withPastPrompts,
   withPrompt,
+  isReplyKey,
+  promptOnlyIds,
+  climbNext,
+  replyKey,
+  splitPastReplies,
+  stopIdsFor,
+  stopKeys,
   withoutBadStops,
   BAND_BUTTONS,
   BUTTONS_WIDTH,
@@ -53,6 +61,7 @@ import {
   EMPTY_FOLD,
 } from '../hooks/logic'
 import type { Seen } from '../hooks/logic'
+import type { Nav } from '../types'
 
 describe('isOwnPrompt', () => {
   test('the person at the terminal or through Remote Control is the person', () => {
@@ -736,5 +745,131 @@ describe('highlightAfterMove', () => {
     expect(highlightAfterMove('latest', ids, null)).toBe('u3')
     expect(highlightAfterMove('latest', [], null)).toBeNull()
     expect(highlightAfterMove('prev', ids, null)).toBeNull()
+  })
+})
+
+describe('replies as stops', () => {
+  const drawnReply = (id: string, text: string) => ({ id, key: replyKey(text) })
+  /** Every reply id is a stop: `replyIds` ⊆ `promptIds`. */
+  const holdsReplies = (nav: Nav) => (nav.replyIds ?? []).every(id => nav.promptIds.includes(id))
+
+  test('a reply\'s key is told apart from a prompt\'s of the same text', () => {
+    expect(replyKey('ok')).not.toBe(promptKey('ok'))
+    expect(isReplyKey(replyKey('ok'))).toBe(true)
+    expect(isReplyKey(promptKey('ok'))).toBe(false)
+    // What the terminal hides of a reply is not part of its key.
+    expect(replyKey('<context>hidden</context>Done.')).toBe(replyKey('Done.'))
+  })
+
+  test('stopKeys lists prompts and replies with text in transcript order', () => {
+    const keys = stopKeys([
+      { role: 'user', text: 'A' },
+      { role: 'assistant', text: 'one' },
+      { role: 'assistant', text: '' },
+      { role: 'user', text: 'result', toolResults: [{}] },
+      { role: 'assistant', text: 'two' },
+      { role: 'user', text: '<task-notification>x</task-notification>' },
+      { role: 'user', text: 'B' },
+    ])
+    expect(keys).toEqual([promptKey('A'), replyKey('one'), replyKey('two'), promptKey('B')])
+  })
+
+  test('a live reply goes last once, is a reply, and leaves the cursor where it is', () => {
+    const nav: Nav = { liveIds: ['p'], pastPrompts: [], promptIds: ['p'], cursorId: 'p' }
+    const next = withLiveReply(nav, 'r')!
+    expect(next).toEqual({ liveIds: ['p', 'r'], pastPrompts: [], promptIds: ['p', 'r'], cursorId: 'p', replyIds: ['r'] })
+    expect(withLiveReply(next, 'r')).toBe(null)
+  })
+
+  test('a live reply drawn and merged first is one stop, not two', () => {
+    const nav: Nav = {
+      liveIds: ['p'],
+      pastPrompts: [drawnReply('r', 'one')],
+      promptIds: ['r', 'p'],
+      cursorId: null,
+      replyIds: ['r'],
+    }
+    const next = withLiveReply(nav, 'r')!
+    expect(next.promptIds).toEqual(['p', 'r'])
+    expect(next.pastPrompts).toEqual([])
+    expect(next.replyIds).toEqual(['r'])
+  })
+
+  test('replies stay replies when a prompt is sent, a bad stop is dropped, or past stops join', () => {
+    let nav: Nav = withLiveReply({ liveIds: ['p1'], pastPrompts: [], promptIds: ['p1'], cursorId: null }, 'r1')!
+    nav = withLivePrompt(nav, 'p2')!
+    expect(nav.replyIds).toEqual(['r1'])
+    expect(stopIdsFor(nav, 'prompts')).toEqual(['p1', 'p2'])
+    expect(promptOnlyIds(nav)).toEqual(['p1', 'p2'])
+    expect(stopIdsFor(nav, 'all')).toEqual(['p1', 'r1', 'p2'])
+
+    const withBad = { ...nav, liveIds: ['placeholder', ...nav.liveIds], promptIds: ['placeholder', ...nav.promptIds], replyIds: ['placeholder', 'r1'] }
+    const clean = withoutBadStops(withBad)
+    expect(clean.replyIds).toEqual(['r1'])
+    expect(clean.promptIds).toEqual(['p1', 'r1', 'p2'])
+
+    const merged = withPastPrompts(
+      nav,
+      [drawnReply('r0', 'zero'), drawnRow('p0', 'P0')],
+      [promptKey('P0'), replyKey('zero'), promptKey('P1')],
+    )!
+    expect(merged.promptIds).toEqual(['p0', 'r0', 'p1', 'r1', 'p2'])
+    expect(merged.replyIds).toEqual(['r1', 'r0'])
+    expect(promptOnlyIds(merged)).toEqual(['p0', 'p1', 'p2'])
+    for (const n of [nav, clean, merged]) expect(holdsReplies(n)).toBe(true)
+  })
+
+  test('a nav stored before replies were stops reads as one with none', () => {
+    const old: Nav = { liveIds: ['a', 'b'], pastPrompts: [], promptIds: ['a', 'b'], cursorId: null }
+    expect(stopIdsFor(old, 'all')).toEqual(['a', 'b'])
+    expect(stopIdsFor(old, 'prompts')).toEqual(['a', 'b'])
+    expect(promptOnlyIds(old)).toEqual(['a', 'b'])
+    expect(withoutBadStops(old)).toBe(old)
+    expect(withLivePrompt(old, 'c')).toEqual({ liveIds: ['a', 'b', 'c'], pastPrompts: [], promptIds: ['a', 'b', 'c'], cursorId: null })
+    expect(withLivePrompt({ ...old, replyIds: [] }, 'c')?.replyIds).toEqual([])
+  })
+
+  test('drawn replies the transcript does not name are no stops; prompts always are', () => {
+    const keys = [promptKey('A'), replyKey('one'), replyKey('same'), promptKey('B')]
+    const { placed, unmatched } = splitPastReplies(
+      [drawnReply('r1', 'one'), drawnReply('rx', 'not there'), drawnRow('pz', 'unknown prompt'), drawnReply('s1', 'same'), drawnReply('s2', 'same')],
+      keys,
+    )
+    expect(placed.map(p => p.id)).toEqual(['r1', 'pz', 's1'])
+    expect(unmatched.map(p => p.id)).toEqual(['rx', 's2'])
+    // A reply of that text the nav holds already takes the transcript's one.
+    expect(splitPastReplies([drawnReply('s2', 'same')], keys, [drawnReply('s1', 'same')]).unmatched.map(p => p.id)).toEqual(['s2'])
+  })
+
+  test('replies stored in all keep their place when the prompts are ordered again', () => {
+    const keys = [promptKey('A'), replyKey('one'), promptKey('B'), replyKey('two')]
+    const past = orderPast([drawnReply('r2', 'two'), drawnRow('pb', 'B'), drawnReply('r1', 'one'), drawnRow('pa', 'A')], keys)
+    expect(past.map(p => p.id)).toEqual(['pa', 'r1', 'pb', 'r2'])
+  })
+
+  test('the climb to the first stop goes up by any stop and never down', () => {
+    // Begun at a reply with no prompt known above it: the first prompt known
+    // (B) lies below, and is no step up.
+    expect(climbNext(['r0', 'B', 'b1'], 'r0')).toBeNull()
+    // Only replies drawn above: the earliest of them is the next step.
+    expect(climbNext(['rx', 'ry', 'r0', 'B'], 'r0')).toBe('rx')
+    // A prompt drawn above.
+    expect(climbNext(['A', 'a1', 'r0', 'B'], 'r0')).toBe('A')
+    // At the head already, or no stop the band knows: the climb ends.
+    expect(climbNext(['A', 'B'], 'A')).toBeNull()
+    expect(climbNext(['A', 'B'], 'gone')).toBeNull()
+    expect(climbNext([], 'A')).toBeNull()
+  })
+
+  test('the stops step through prompts and replies, and from inside a reply prev goes to its top', () => {
+    const ids = ['A', 'a1', 'a2', 'B', 'b1']
+    expect(navTarget('prev', ids, null)?.id).toBe('b1')
+    expect(navTarget('prev', ids, 'b1')?.id).toBe('B')
+    expect(navTarget('prev', ids, 'B')?.id).toBe('a2')
+    // a1's row top scrolled away, a2's below: the viewport is inside a1.
+    const view = viewSpan(ids, new Map<string, Seen>([['a1', { first: 4, last: 9, of: 20 }]]))
+    expect(view).toEqual({ lo: 1, hi: 1.5, at: 1.5 })
+    expect(navTarget('prev', ids, null, view, true)?.id).toBe('a1')
+    expect(navTarget('next', ids, null, view, true)?.id).toBe('a2')
   })
 })
