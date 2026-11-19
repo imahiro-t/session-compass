@@ -13,6 +13,7 @@ import {
   promptKey,
   promptLine,
   promptOnlyIds,
+  climbNext,
   replyKey,
   splitPastReplies,
   stopIdsFor,
@@ -245,12 +246,18 @@ async function mergeBuffer($: Dollar): Promise<void> {
   const unknown = unknownPrompts(held, drawn)
   let isHeld = unknown.length === 0
   if (!isHeld) {
-    const keys = (await transcriptPrompts($)).keys
+    const { keys, deny } = await transcriptPrompts($)
     const { unmatched } = splitPastReplies(unknown, keys, held.pastPrompts)
     for (const p of unmatched) {
+      // A refused read names no reply: those stay in the buffer, looked up
+      // again at the next merge, not taken for replies the transcript lacks.
+      if (deny !== undefined) continue
       unmatchedReplies.set(p.id, p.key)
       if (renderBuffer.get(p.id) === p.key) renderBuffer.delete(p.id)
       debug($, `the reply ${p.id} matches none in the transcript: no stop`)
+    }
+    if (deny !== undefined && unmatched.length > 0) {
+      debug($, `could not read the transcript to place ${unmatched.length} drawn replies: ${deny}`)
     }
     const skipped = new Set(unmatched.map(p => p.id))
     drawn = drawn.filter(p => !skipped.has(p.id))
@@ -677,11 +684,12 @@ function sleep($: Dollar, ms: number): Promise<void> {
  * Only drawn rows tell their ids, and a long or resumed transcript draws
  * only the rows near the viewport, so the earliest prompt known may not be
  * the first. While the transcript holds more of the person's prompts than
- * the mod knows, it shows the screen above the known first prompt (that
- * prompt at the bottom), lets the rows there draw, and moves on to any
- * earlier prompt they show; at the last one found it puts that prompt on
- * top. It stops where the screen above shows no prompt (a reply longer than
- * the screen) or a scroll is refused.
+ * the mod knows, it shows the screen above the known first stop (that stop
+ * at the bottom), lets the rows there draw, and moves on to any earlier
+ * stop they show (a prompt, or in `all` a reply too); at the last one found
+ * it puts that stop on top. It stops where the screen above shows no
+ * earlier stop (a reply longer than the screen) or a scroll is refused, and
+ * never moves down (`climbNext`).
  */
 async function walkUp($: Dollar, surface: string, from: string): Promise<void> {
   // Prompts are counted against prompts: the replies the band knows are no
@@ -699,10 +707,14 @@ async function walkUp($: Dollar, surface: string, from: string): Promise<void> {
     }
     await sleep($, WALK_WAIT_MS)
     if (renderBuffer.size > 0) await mergeBuffer($)
-    const first = promptOnlyIds(withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV))[0]
-    if (first === undefined || first === current) break
-    debug($, `found ${first} above ${current}`)
-    current = first
+    // The climb goes by the stops, not the prompts alone: a reply drawn
+    // above is a step up too, and a prompt known only below `current` is
+    // never one.
+    const stops = stopIdsFor(withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV), navMode)
+    const above = climbNext(stops, current)
+    if (above === null) break
+    debug($, `found ${above} above ${current}`)
+    current = above
   }
   const ids = stopIdsFor(withoutBadStops((await $.state.get(NAV)).value ?? EMPTY_NAV), navMode)
   noteMove(viewOn(surface), ids, Math.max(0, ids.indexOf(current)), Date.now())
@@ -776,13 +788,14 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && result.deny === undefined && NEWEST_DOORS.has(e.door)) {
       noteNewestRow(rowIdOf(e.uuid, (e.message as { content?: unknown }).content))
     }
-    // A reply of the main conversation with text is a stop (in `all`), by
+    // A reply of the main conversation with text (`response`, not a notice) is a stop (in `all`), by
     // the id its text block is drawn under.
     const { uuid } = e
     if (
       navMode === 'all' &&
       e.agentId === undefined &&
       result.deny === undefined &&
+      e.door === 'response' &&
       e.message.type === 'assistant' &&
       isStopId(uuid) &&
       hasText((e.message as { content?: unknown }).content)

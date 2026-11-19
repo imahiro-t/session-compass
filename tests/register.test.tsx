@@ -1324,3 +1324,38 @@ test('a drawn reply the transcript does not name is no stop, and is not looked u
   expect(calls.scroll.every(id => id === 'u1')).toBe(true)
   await band.unmount()
 })
+
+test('an assistant row that came in by another door than a response is no stop', async ($, on) => {
+  const { clock } = engine(on)
+  const store = versionedStore(on)
+  await start($)
+  await say($, 'A', 'prompt A')
+  await $.session.append({
+    door: 'notice',
+    origin: { kind: 'model' } as never,
+    uuid: 'n1',
+    message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'a notice' }] } as never,
+  } as never)
+  await reply($, 'r1', 'reply 1')
+  await clock.settle()
+  expect((store.get('nav')!.value as Nav).promptIds).toEqual(['A', 'r1'])
+})
+
+test('a drawn reply is looked up again after a refused transcript read, not taken for one the transcript lacks', async ($, on) => {
+  const { clock, calls } = engine(on, undefined, { messagesDeny: 'not now' })
+  rowEngines(on)
+  await start($)
+  await say($, 'u1', 'one')
+  await clock.settle()
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await drawReplyRow($, 'ax', 'some reply')
+  const read = calls.messages
+  await band.press({ key: 'prev' })
+  await band.press({ key: 'prev' })
+  // Still buffered: each merge reads the transcript again.
+  expect(calls.messages).toBe(read + 2)
+  expect(calls.logs).not.toContainEqual('session-compass: the reply ax matches none in the transcript: no stop')
+  expect(calls.logs).toContainEqual('session-compass: could not read the transcript to place 1 drawn replies: not now')
+  await band.unmount()
+})

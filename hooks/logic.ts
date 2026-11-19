@@ -374,6 +374,12 @@ export function promptKey(text: string): string {
  * session a drawn prompt older than those matches nothing and is placed among
  * the unmatched ones, by the order it was drawn: there is no other source for
  * the order of rows that old.
+ *
+ * Stops of the same text (a short reply said twice, "Done.") are told apart
+ * by nothing but the order they were met in: one drawn first takes the
+ * earliest row of that text, so where a later one is drawn before an
+ * earlier one (scrolling back up a resumed session), the two swap places.
+ * A known limit: the rows say nothing more of where they sit.
  */
 export function orderPast(
   past: readonly PastPrompt[],
@@ -459,6 +465,19 @@ export function stopIdsFor(nav: Nav, mode: NavMode): string[] {
 /** The person's prompts among the stops, oldest first: what counts the prompts (⏫'s climb). */
 export function promptOnlyIds(nav: Nav): string[] {
   return stopIdsFor(nav, 'prompts')
+}
+
+/**
+ * Where the climb to the session's first stop (`walkUp`) looks above next,
+ * from `current`, the stop it last put at the screen's bottom: the earliest
+ * stop the band knows (`stops`, oldest first) when that lies above `current`.
+ * Null when the rows drawn above showed no earlier stop, or `current` is no
+ * stop the band knows: the climb ends at `current`. Never a stop below it,
+ * so a climb begun at a reply with no prompt drawn above does not turn back
+ * down to a later prompt.
+ */
+export function climbNext(stops: readonly string[], current: string): string | null {
+  return stops.indexOf(current) > 0 ? stops[0]! : null
 }
 
 /**

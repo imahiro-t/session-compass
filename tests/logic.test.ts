@@ -39,6 +39,7 @@ import {
   withPrompt,
   isReplyKey,
   promptOnlyIds,
+  climbNext,
   replyKey,
   splitPastReplies,
   stopIdsFor,
@@ -844,6 +845,20 @@ describe('replies as stops', () => {
     const keys = [promptKey('A'), replyKey('one'), promptKey('B'), replyKey('two')]
     const past = orderPast([drawnReply('r2', 'two'), drawnRow('pb', 'B'), drawnReply('r1', 'one'), drawnRow('pa', 'A')], keys)
     expect(past.map(p => p.id)).toEqual(['pa', 'r1', 'pb', 'r2'])
+  })
+
+  test('the climb to the first stop goes up by any stop and never down', () => {
+    // Begun at a reply with no prompt known above it: the first prompt known
+    // (B) lies below, and is no step up.
+    expect(climbNext(['r0', 'B', 'b1'], 'r0')).toBeNull()
+    // Only replies drawn above: the earliest of them is the next step.
+    expect(climbNext(['rx', 'ry', 'r0', 'B'], 'r0')).toBe('rx')
+    // A prompt drawn above.
+    expect(climbNext(['A', 'a1', 'r0', 'B'], 'r0')).toBe('A')
+    // At the head already, or no stop the band knows: the climb ends.
+    expect(climbNext(['A', 'B'], 'A')).toBeNull()
+    expect(climbNext(['A', 'B'], 'gone')).toBeNull()
+    expect(climbNext([], 'A')).toBeNull()
   })
 
   test('the stops step through prompts and replies, and from inside a reply prev goes to its top', () => {
